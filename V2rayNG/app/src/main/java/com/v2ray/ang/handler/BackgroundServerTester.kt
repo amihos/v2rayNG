@@ -24,15 +24,24 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Handles periodic server testing and automatic server switching.
  * Uses WorkManager (RemoteWorkManager for multi-process support) for reliable background execution.
+ *
+ * Smart Connect Algorithm:
+ * 1. Test servers in batches (BATCH_SIZE at a time)
+ * 2. Connect user to FIRST working server immediately
+ * 3. Continue testing remaining servers in background
+ * 4. Switch to better server if found (with threshold)
  */
 object BackgroundServerTester {
 
@@ -45,6 +54,12 @@ object BackgroundServerTester {
     // Max parallelism for battery efficiency (lower = less battery drain)
     private const val MAX_PARALLELISM = 2
 
+    // Batch size for Smart Connect - test this many servers before checking for results
+    private const val SMART_CONNECT_BATCH_SIZE = 10
+
+    // "Good enough" latency threshold - stop searching if we find a server this fast
+    private const val GOOD_ENOUGH_LATENCY_MS = 300L
+
     // Input data key for subscription ID
     private const val KEY_SUBSCRIPTION_ID = "subscription_id"
 
@@ -54,10 +69,24 @@ object BackgroundServerTester {
     // Flag to track if a switch operation is in progress
     private val isSwitching = AtomicBoolean(false)
 
+    // Flag to allow cancellation of Smart Connect
+    private val smartConnectCancelled = AtomicBoolean(false)
+
     data class TestResult(
         val guid: String,
         val remarks: String,
         val delay: Long
+    )
+
+    /**
+     * Result holder for Smart Connect with progress tracking.
+     */
+    data class SmartConnectResult(
+        val firstWorking: TestResult?,      // First working server (for immediate connection)
+        val bestServer: TestResult?,        // Best server found overall
+        val testedCount: Int,               // Number of servers tested
+        val totalCount: Int,                // Total servers to test
+        val isComplete: Boolean             // Whether all testing is done
     )
 
     /**
@@ -281,7 +310,8 @@ object BackgroundServerTester {
     }
 
     /**
-     * Tests servers and returns the best one (for Smart Connect).
+     * Tests servers and returns the best one (for Smart Connect) - legacy method.
+     * Consider using smartConnectWithCallbacks for better UX.
      *
      * @param context Context (will use applicationContext internally).
      * @param subscriptionId The subscription ID (empty for all servers).
@@ -294,6 +324,119 @@ object BackgroundServerTester {
 
         val results = testServers(appContext, servers, "smart_connect")
         return results.filter { it.delay > 0 }.minByOrNull { it.delay }
+    }
+
+    /**
+     * Smart Connect with callbacks - connects user quickly then optimizes in background.
+     *
+     * Algorithm:
+     * 1. Shuffle servers to avoid always testing same ones first
+     * 2. Test in batches of SMART_CONNECT_BATCH_SIZE
+     * 3. Call onFirstWorking as soon as ANY working server is found
+     * 4. Continue testing remaining servers
+     * 5. Call onBetterFound if a significantly better server is discovered
+     * 6. Stop early if a "good enough" server is found (< GOOD_ENOUGH_LATENCY_MS)
+     *
+     * @param context Application context.
+     * @param subscriptionId Subscription ID (empty for all servers).
+     * @param onProgress Called with progress updates (tested/total).
+     * @param onFirstWorking Called when first working server found - connect user immediately!
+     * @param onBetterFound Called if a better server is found during continued testing.
+     * @param onComplete Called when all testing is complete.
+     */
+    suspend fun smartConnectWithCallbacks(
+        context: Context,
+        subscriptionId: String,
+        onProgress: (tested: Int, total: Int) -> Unit = { _, _ -> },
+        onFirstWorking: (TestResult) -> Unit,
+        onBetterFound: (TestResult) -> Unit = {},
+        onComplete: (bestServer: TestResult?) -> Unit = {}
+    ) {
+        val appContext = context.applicationContext
+        smartConnectCancelled.set(false)
+
+        val servers = MmkvManager.getServersBySubscriptionId(subscriptionId).shuffled()
+        if (servers.isEmpty()) {
+            onComplete(null)
+            return
+        }
+
+        val totalCount = servers.size
+        val testUrl = SettingsManager.getDelayTestUrl()
+        val bestServer = AtomicReference<TestResult?>(null)
+        var firstWorkingFound = false
+        var testedCount = 0
+
+        Log.i(AppConfig.TAG, "Smart Connect: Starting test of $totalCount servers")
+
+        // Process servers in batches
+        for (batch in servers.chunked(SMART_CONNECT_BATCH_SIZE)) {
+            if (smartConnectCancelled.get()) {
+                Log.i(AppConfig.TAG, "Smart Connect: Cancelled")
+                break
+            }
+
+            // Test batch in parallel
+            val batchResults = coroutineScope {
+                batch.map { guid ->
+                    async(Dispatchers.IO) {
+                        testSingleServer(appContext, guid, testUrl, "smart_connect")
+                    }
+                }.awaitAll()
+            }.filterNotNull()
+
+            testedCount += batch.size
+            onProgress(testedCount, totalCount)
+
+            // Check results from this batch
+            for (result in batchResults) {
+                if (result.delay <= 0) continue // Skip failed servers
+
+                val currentBest = bestServer.get()
+
+                // First working server found - connect immediately!
+                if (!firstWorkingFound) {
+                    firstWorkingFound = true
+                    bestServer.set(result)
+                    Log.i(AppConfig.TAG, "Smart Connect: First working server found: ${result.remarks} (${result.delay}ms)")
+                    onFirstWorking(result)
+
+                    // If this server is "good enough", stop testing
+                    if (result.delay <= GOOD_ENOUGH_LATENCY_MS) {
+                        Log.i(AppConfig.TAG, "Smart Connect: Good enough server found, stopping early")
+                        onComplete(result)
+                        return
+                    }
+                } else if (currentBest != null && result.delay < currentBest.delay * SWITCH_THRESHOLD) {
+                    // Found a significantly better server
+                    bestServer.set(result)
+                    Log.i(AppConfig.TAG, "Smart Connect: Better server found: ${result.remarks} (${result.delay}ms vs ${currentBest.delay}ms)")
+                    onBetterFound(result)
+
+                    // If this server is "good enough", stop testing
+                    if (result.delay <= GOOD_ENOUGH_LATENCY_MS) {
+                        Log.i(AppConfig.TAG, "Smart Connect: Good enough server found, stopping early")
+                        onComplete(result)
+                        return
+                    }
+                } else if (currentBest == null || result.delay < currentBest.delay) {
+                    // Better but not significantly - just update tracking
+                    bestServer.set(result)
+                }
+            }
+        }
+
+        val finalBest = bestServer.get()
+        Log.i(AppConfig.TAG, "Smart Connect: Complete. Best server: ${finalBest?.remarks} (${finalBest?.delay}ms)")
+        onComplete(finalBest)
+    }
+
+    /**
+     * Cancels any ongoing Smart Connect operation.
+     */
+    fun cancelSmartConnect() {
+        smartConnectCancelled.set(true)
+        Log.i(AppConfig.TAG, "Smart Connect: Cancel requested")
     }
 
     /**

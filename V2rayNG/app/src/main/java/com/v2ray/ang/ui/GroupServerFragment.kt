@@ -84,6 +84,18 @@ class GroupServerFragment : BaseFragment<FragmentGroupServerBinding>() {
     }
 
     /**
+     * Scrolls the RecyclerView to show the server at the given position.
+     * @param position The position to scroll to
+     */
+    fun scrollToPosition(position: Int) {
+        if (position >= 0) {
+            binding.recyclerView.post {
+                binding.recyclerView.smoothScrollToPosition(position)
+            }
+        }
+    }
+
+    /**
      * Shares server configuration
      * Displays a dialog with sharing options and executes the selected action
      * @param guid The server unique identifier

@@ -150,31 +150,94 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
         }
     }
 
+    private var isSmartConnecting = false
+
     private fun handleSmartConnect() {
-        binding.fabSmartConnect.isEnabled = false
+        // If already running, cancel it
+        if (isSmartConnecting) {
+            BackgroundServerTester.cancelSmartConnect()
+            isSmartConnecting = false
+            binding.fabSmartConnect.isEnabled = true
+            setTestState(getString(R.string.smart_connect_cancelled))
+            return
+        }
+
+        isSmartConnecting = true
+        binding.fabSmartConnect.isEnabled = true // Keep enabled for cancel
         setTestState(getString(R.string.smart_connect_testing))
 
         lifecycleScope.launch {
-            val bestServer = withContext(Dispatchers.IO) {
-                BackgroundServerTester.testAndFindBest(this@MainActivity, mainViewModel.subscriptionId)
-            }
+            var connectedToFirst = false
 
-            if (bestServer != null) {
-                MmkvManager.setSelectServer(bestServer.guid)
-                mainViewModel.reloadServerList()
+            BackgroundServerTester.smartConnectWithCallbacks(
+                context = this@MainActivity,
+                subscriptionId = mainViewModel.subscriptionId,
 
-                if (mainViewModel.isRunning.value == true) {
-                    restartV2Ray()
-                } else {
-                    startV2RayWithPermissionCheck()
+                onProgress = { tested, total ->
+                    runOnUiThread {
+                        setTestState(getString(R.string.smart_connect_progress, tested, total))
+                    }
+                },
+
+                onFirstWorking = { server ->
+                    // Connect immediately to first working server
+                    runOnUiThread {
+                        connectedToFirst = true
+                        MmkvManager.setSelectServer(server.guid)
+                        mainViewModel.reloadServerList()
+                        scrollToServer(server.guid)
+
+                        if (mainViewModel.isRunning.value == true) {
+                            restartV2Ray()
+                        } else {
+                            startV2RayWithPermissionCheck()
+                        }
+
+                        toast(getString(R.string.smart_connect_connected, server.remarks, server.delay))
+                        setTestState(getString(R.string.smart_connect_optimizing))
+                    }
+                },
+
+                onBetterFound = { betterServer ->
+                    // Found a better server - switch to it
+                    runOnUiThread {
+                        MmkvManager.setSelectServer(betterServer.guid)
+                        mainViewModel.reloadServerList()
+                        scrollToServer(betterServer.guid)
+
+                        if (mainViewModel.isRunning.value == true) {
+                            restartV2Ray()
+                        }
+
+                        toast(getString(R.string.smart_connect_switched, betterServer.remarks, betterServer.delay))
+                    }
+                },
+
+                onComplete = { bestServer ->
+                    runOnUiThread {
+                        isSmartConnecting = false
+                        binding.fabSmartConnect.isEnabled = true
+
+                        if (bestServer != null) {
+                            // Make sure we're on the best server
+                            if (MmkvManager.getSelectServer() != bestServer.guid) {
+                                MmkvManager.setSelectServer(bestServer.guid)
+                                mainViewModel.reloadServerList()
+                                scrollToServer(bestServer.guid)
+                                if (mainViewModel.isRunning.value == true) {
+                                    restartV2Ray()
+                                }
+                            }
+                            setTestState(getString(R.string.smart_connect_complete, bestServer.delay))
+                        } else if (!connectedToFirst) {
+                            toastError(R.string.smart_connect_no_servers)
+                            setTestState("")
+                        } else {
+                            setTestState("")
+                        }
+                    }
                 }
-
-                toast(getString(R.string.smart_connect_success, bestServer.remarks, bestServer.delay))
-            } else {
-                toastError(R.string.smart_connect_no_servers)
-            }
-
-            binding.fabSmartConnect.isEnabled = true
+            )
         }
     }
 
@@ -225,12 +288,31 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
             binding.fab.contentDescription = getString(R.string.action_stop_service)
             setTestState(getString(R.string.connection_connected))
             binding.layoutTest.isFocusable = true
+            // Smart Connect button: green when VPN is running
+            binding.fabSmartConnect.backgroundTintList = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.color_fab_smart_connected))
         } else {
             binding.fab.setImageResource(R.drawable.ic_play_24dp)
             binding.fab.backgroundTintList = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.color_fab_inactive))
             binding.fab.contentDescription = getString(R.string.tasker_start_service)
             setTestState(getString(R.string.connection_not_connected))
             binding.layoutTest.isFocusable = false
+            // Smart Connect button: orange when VPN is not running
+            binding.fabSmartConnect.backgroundTintList = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.color_fab_smart))
+        }
+    }
+
+    /**
+     * Scrolls the current server list to show the server with the given guid.
+     * @param guid The server unique identifier
+     */
+    private fun scrollToServer(guid: String) {
+        val position = mainViewModel.getPosition(guid)
+        if (position >= 0) {
+            // Get the current fragment from ViewPager2
+            val currentItem = binding.viewPager.currentItem
+            val fragmentTag = "f${groupPagerAdapter.getItemId(currentItem)}"
+            val fragment = supportFragmentManager.findFragmentByTag(fragmentTag)
+            (fragment as? GroupServerFragment)?.scrollToPosition(position)
         }
     }
 

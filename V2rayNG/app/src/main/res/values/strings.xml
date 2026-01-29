@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name" translatable="false">v2rayNG</string>
+    <string name="app_name" translatable="false">GoServer</string>
     <string name="app_widget_name">Switch</string>
     <string name="app_tile_name">Switch</string>
     <string name="app_tile_first_use">First use of this feature, please use the app to add server</string>
@@ -266,6 +266,12 @@
     <!-- Smart Connect Button -->
     <string name="smart_connect">Smart Connect</string>
     <string name="smart_connect_testing">Finding best server…</string>
+    <string name="smart_connect_progress">Testing servers… %1$d/%2$d</string>
+    <string name="smart_connect_connected">Connected to %1$s (%2$dms) - optimizing…</string>
+    <string name="smart_connect_optimizing">Connected! Finding faster server…</string>
+    <string name="smart_connect_switched">Switched to faster: %1$s (%2$dms)</string>
+    <string name="smart_connect_complete">Best server: %1$dms</string>
+    <string name="smart_connect_cancelled">Cancelled</string>
     <string name="smart_connect_success">Connected to %1$s (%2$dms)</string>
     <string name="smart_connect_no_servers">No working servers found</string>
 

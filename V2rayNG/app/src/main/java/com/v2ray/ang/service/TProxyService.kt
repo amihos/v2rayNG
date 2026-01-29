@@ -28,8 +28,33 @@ class TProxyService(
         @Suppress("FunctionName")
         private external fun TProxyGetStats(): LongArray?
 
-        init {
-            System.loadLibrary("hev-socks5-tunnel")
+        @Volatile
+        private var libraryLoaded = false
+
+        /**
+         * Loads the native library on demand to avoid crashes when library is not present
+         * and HevTun is disabled.
+         * @return true if library was loaded successfully, false otherwise
+         */
+        @Synchronized
+        fun loadLibrary(): Boolean {
+            if (libraryLoaded) return true
+            return try {
+                System.loadLibrary("hev-socks5-tunnel")
+                libraryLoaded = true
+                true
+            } catch (e: UnsatisfiedLinkError) {
+                Log.e(AppConfig.TAG, "Failed to load hev-socks5-tunnel library: ${e.message}")
+                false
+            }
+        }
+
+        /**
+         * Check if the native library is available (can be loaded).
+         * This is a non-crashing check that can be used before deciding to use HevTun.
+         */
+        fun isLibraryAvailable(): Boolean {
+            return libraryLoaded || loadLibrary()
         }
     }
 
@@ -37,17 +62,19 @@ class TProxyService(
      * Starts the tun2socks process with the appropriate parameters.
      */
     override fun startTun2Socks() {
-//        Log.i(AppConfig.TAG, "Starting HevSocks5Tunnel via JNI")
+        // Load library on demand - fail gracefully if not available
+        if (!loadLibrary()) {
+            Log.e(AppConfig.TAG, "Cannot start HevSocks5Tunnel - library not available")
+            return
+        }
 
         val configContent = buildConfig()
         val configFile = File(context.filesDir, "hev-socks5-tunnel.yaml").apply {
             writeText(configContent)
         }
-//        Log.i(AppConfig.TAG, "Config file created: ${configFile.absolutePath}")
         Log.d(AppConfig.TAG, "HevSocks5Tunnel Config content:\n$configContent")
 
         try {
-//            Log.i(AppConfig.TAG, "TProxyStartService...")
             TProxyStartService(configFile.absolutePath, vpnInterface.fd)
         } catch (e: Exception) {
             Log.e(AppConfig.TAG, "HevSocks5Tunnel exception: ${e.message}")

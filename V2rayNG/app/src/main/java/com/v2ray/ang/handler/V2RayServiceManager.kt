@@ -14,6 +14,7 @@ import com.v2ray.ang.dto.EConfigType
 import com.v2ray.ang.dto.ProfileItem
 import com.v2ray.ang.extension.toast
 import com.v2ray.ang.service.ServiceControl
+import com.v2ray.ang.service.TProxyService
 import com.v2ray.ang.service.V2RayProxyOnlyService
 import com.v2ray.ang.service.V2RayVpnService
 import com.v2ray.ang.util.MessageUtil
@@ -161,7 +162,9 @@ object V2RayServiceManager {
 
         currentConfig = config
         var tunFd = vpnInterface?.fd ?: 0
-        if (SettingsManager.isUsingHevTun()) {
+        // Only set tunFd to 0 if HevTun is enabled AND library is available
+        // Otherwise, pass FD to xray-core to handle TUN directly
+        if (SettingsManager.isUsingHevTun() && TProxyService.isLibraryAvailable()) {
             tunFd = 0
         }
 
