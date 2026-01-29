@@ -9,6 +9,7 @@ import android.util.Log
 import android.view.KeyEvent
 import android.view.Menu
 import android.view.MenuItem
+import android.view.animation.AnimationUtils
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
@@ -151,19 +152,28 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
     }
 
     private var isSmartConnecting = false
+    private val rotateAnimation by lazy { AnimationUtils.loadAnimation(this, R.anim.rotate_infinite) }
+
+    private fun startSmartConnectAnimation() {
+        binding.fabSmartConnect.startAnimation(rotateAnimation)
+    }
+
+    private fun stopSmartConnectAnimation() {
+        binding.fabSmartConnect.clearAnimation()
+    }
 
     private fun handleSmartConnect() {
         // If already running, cancel it
         if (isSmartConnecting) {
             BackgroundServerTester.cancelSmartConnect()
             isSmartConnecting = false
-            binding.fabSmartConnect.isEnabled = true
+            stopSmartConnectAnimation()
             setTestState(getString(R.string.smart_connect_cancelled))
             return
         }
 
         isSmartConnecting = true
-        binding.fabSmartConnect.isEnabled = true // Keep enabled for cancel
+        startSmartConnectAnimation()
         setTestState(getString(R.string.smart_connect_testing))
 
         lifecycleScope.launch {
@@ -216,7 +226,7 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
                 onComplete = { bestServer ->
                     runOnUiThread {
                         isSmartConnecting = false
-                        binding.fabSmartConnect.isEnabled = true
+                        stopSmartConnectAnimation()
 
                         if (bestServer != null) {
                             // Make sure we're on the best server

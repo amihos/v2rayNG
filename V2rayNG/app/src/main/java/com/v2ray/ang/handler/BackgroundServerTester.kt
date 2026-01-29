@@ -58,7 +58,8 @@ object BackgroundServerTester {
     data class TestResult(
         val guid: String,
         val remarks: String,
-        val delay: Long
+        val delay: Long,
+        val score: Double = delay.toDouble()  // Default to latency, weighted by reliability
     )
 
     data class SmartConnectResult(
@@ -94,7 +95,7 @@ object BackgroundServerTester {
 
             val bestResult = testServers(applicationContext, servers, "background")
                 .filter { it.delay > 0 }
-                .minByOrNull { it.delay }
+                .minByOrNull { it.score }
 
             if (bestResult != null) {
                 Log.i(AppConfig.TAG, "Best server: ${bestResult.remarks} (${bestResult.delay}ms)")
@@ -241,7 +242,9 @@ object BackgroundServerTester {
 
             val delay = V2RayNativeManager.measureOutboundDelay(result.content, testUrl)
             MmkvManager.encodeServerTestDelayMillis(guid, delay, testSource)
-            TestResult(guid, remarks, delay)
+            val affiliationInfo = MmkvManager.decodeServerAffiliationInfo(guid)
+            val score = affiliationInfo?.getWeightedScore() ?: delay.toDouble()
+            TestResult(guid, remarks, delay, score)
         } catch (e: java.net.SocketTimeoutException) {
             Log.d(AppConfig.TAG, "Server $guid timed out")
             recordFailure(guid, remarks, testSource)
@@ -256,7 +259,9 @@ object BackgroundServerTester {
 
     private fun recordFailure(guid: String, remarks: String, testSource: String): TestResult {
         MmkvManager.encodeServerTestDelayMillis(guid, -1L, testSource)
-        return TestResult(guid, remarks, -1L)
+        val affiliationInfo = MmkvManager.decodeServerAffiliationInfo(guid)
+        val score = affiliationInfo?.getWeightedScore() ?: Double.MAX_VALUE
+        return TestResult(guid, remarks, -1L, score)
     }
 
     /**
@@ -268,7 +273,7 @@ object BackgroundServerTester {
 
         return testServers(context.applicationContext, servers, "smart_connect")
             .filter { it.delay > 0 }
-            .minByOrNull { it.delay }
+            .minByOrNull { it.score }
     }
 
     /**
@@ -338,20 +343,20 @@ object BackgroundServerTester {
                         onComplete(result)
                         return
                     }
-                } else if (currentBest != null && result.delay < currentBest.delay * SWITCH_THRESHOLD) {
-                    // Found a significantly better server
+                } else if (currentBest != null && result.score < currentBest.score * SWITCH_THRESHOLD) {
+                    // Found a significantly better server (by weighted score)
                     bestServer.set(result)
                     Log.i(AppConfig.TAG, "Smart Connect: Better server found: ${result.remarks} (${result.delay}ms vs ${currentBest.delay}ms)")
                     onBetterFound(result)
 
-                    // If this server is "good enough", stop testing
+                    // If this server is "good enough" by latency, stop testing (user cares about perceived latency)
                     if (result.delay <= GOOD_ENOUGH_LATENCY_MS) {
                         Log.i(AppConfig.TAG, "Smart Connect: Good enough server found, stopping early")
                         onComplete(result)
                         return
                     }
-                } else if (currentBest == null || result.delay < currentBest.delay) {
-                    // Better but not significantly - just update tracking
+                } else if (currentBest == null || result.score < currentBest.score) {
+                    // Better by score but not significantly - just update tracking
                     bestServer.set(result)
                 }
             }

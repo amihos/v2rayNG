@@ -181,6 +181,7 @@ object V2RayServiceManager {
             MessageUtil.sendMsg2UI(service, AppConfig.MSG_STATE_START_SUCCESS, "")
             NotificationManager.showNotification(currentConfig)
             NotificationManager.startSpeedNotification(currentConfig)
+            ConnectionHealthMonitor.startMonitoring(service)
 
         } catch (e: Exception) {
             Log.e(AppConfig.TAG, "Failed to startup service", e)
@@ -196,6 +197,8 @@ object V2RayServiceManager {
      */
     fun stopCoreLoop(): Boolean {
         val service = getService() ?: return false
+
+        ConnectionHealthMonitor.stopMonitoring()
 
         if (coreController.isRunning) {
             CoroutineScope(Dispatchers.IO).launch {

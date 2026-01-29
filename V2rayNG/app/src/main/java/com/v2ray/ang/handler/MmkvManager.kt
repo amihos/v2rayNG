@@ -197,9 +197,10 @@ object MmkvManager {
 
     /**
      * Encodes the server test delay in milliseconds.
+     * Also tracks historical success/failure counts for reliability scoring.
      *
      * @param guid The server GUID.
-     * @param testResult The test delay in milliseconds.
+     * @param testResult The test delay in milliseconds (>0 = success, <=0 = failure).
      * @param testSource The source of the test (manual, background, post-sub).
      */
     fun encodeServerTestDelayMillis(guid: String, testResult: Long, testSource: String = "manual") {
@@ -210,6 +211,12 @@ object MmkvManager {
         aff.testDelayMillis = testResult
         aff.lastTestTime = System.currentTimeMillis()
         aff.testSource = testSource
+        // Track historical success/failure for reliability scoring
+        if (testResult > 0) {
+            aff.successCount++
+        } else {
+            aff.failureCount++
+        }
         serverAffStorage.encode(guid, JsonUtil.toJson(aff))
     }
 
