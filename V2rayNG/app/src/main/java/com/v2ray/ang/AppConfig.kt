@@ -51,6 +51,7 @@ object AppConfig {
     const val PREF_AUTO_SERVER_SWITCH_ENABLED = "pref_auto_server_switch_enabled"
     const val AUTO_SERVER_TEST_TASK_NAME = "auto_server_tester"
     const val DEFAULT_AUTO_TEST_INTERVAL = "60"
+    const val PREF_PREFERRED_REGION = "pref_preferred_region"
     const val PREF_SPEED_ENABLED = "pref_speed_enabled"
     const val PREF_CONFIRM_REMOVE = "pref_confirm_remove"
     const val PREF_START_SCAN_IMMEDIATE = "pref_start_scan_immediate"
@@ -81,6 +82,7 @@ object AppConfig {
     /** Cache keys. */
     const val CACHE_SUBSCRIPTION_ID = "cache_subscription_id"
     const val CACHE_KEYWORD_FILTER = "cache_keyword_filter"
+    const val PREF_LATENCY_HISTORY = "pref_latency_history"
 
     /** Protocol identifiers. */
     const val PROTOCOL_FREEDOM = "freedom"

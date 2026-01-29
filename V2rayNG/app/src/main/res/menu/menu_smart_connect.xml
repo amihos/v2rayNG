@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:id="@+id/smart_connect_test_all"
+        android:title="@string/smart_connect_test_all" />
+    <item
+        android:id="@+id/smart_connect_clear_cache"
+        android:title="@string/smart_connect_clear_cache" />
+    <item
+        android:id="@+id/smart_connect_settings"
+        android:title="@string/smart_connect_settings" />
+</menu>

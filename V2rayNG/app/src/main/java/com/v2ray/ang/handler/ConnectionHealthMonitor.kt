@@ -3,6 +3,7 @@ package com.v2ray.ang.handler
 import android.content.Context
 import android.util.Log
 import com.v2ray.ang.AppConfig
+import com.v2ray.ang.R
 import kotlinx.coroutines.*
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -129,19 +130,58 @@ object ConnectionHealthMonitor {
     }
 
     private fun handleDegradation(context: Context, reason: String) {
-        if (!MmkvManager.decodeSettingsBool(AppConfig.PREF_AUTO_SERVER_SWITCH_ENABLED, true)) {
-            Log.d(AppConfig.TAG, "Auto-switch disabled, not triggering test")
+        Log.w(AppConfig.TAG, "Connection degradation detected: $reason")
+
+        val autoSwitchEnabled = MmkvManager.decodeSettingsBool(AppConfig.PREF_AUTO_SERVER_SWITCH_ENABLED, true)
+        if (!autoSwitchEnabled) {
+            Log.d(AppConfig.TAG, "Auto-switch disabled, skipping degradation handling")
             return
         }
 
-        Log.i(AppConfig.TAG, "Triggering background test due to: $reason")
+        // Get current server info before switch
+        val currentServer = MmkvManager.getSelectServer()
+        val currentConfig = currentServer?.let { MmkvManager.decodeServerConfig(it) }
+        val currentLatency = baselineLatency.get()
 
-        // Reset baseline since we're potentially switching servers
-        resetBaseline()
+        CoroutineScope(Dispatchers.IO).launch {
+            val subscriptionId = MmkvManager.decodeSettingsString(AppConfig.CACHE_SUBSCRIPTION_ID, "") ?: ""
+            BackgroundServerTester.clearCache()  // Force fresh test
 
-        // Trigger immediate background test
-        val subscriptionId = MmkvManager.decodeSettingsString(AppConfig.CACHE_SUBSCRIPTION_ID, "") ?: ""
-        BackgroundServerTester.triggerImmediateTest(context, subscriptionId)
+            val bestServer = BackgroundServerTester.testAndFindBest(context, subscriptionId)
+            if (bestServer != null && bestServer.guid != currentServer && bestServer.delay > 0) {
+                val switched = V2RayServiceManager.switchServer(context, bestServer.guid)
+                if (switched) {
+                    // Calculate improvement
+                    val improvement = if (currentLatency > 0 && bestServer.delay > 0) {
+                        ((currentLatency - bestServer.delay) * 100 / currentLatency).toInt()
+                    } else {
+                        0
+                    }
+
+                    val message = if (currentConfig != null && currentLatency > 0 && improvement > 0) {
+                        context.getString(
+                            R.string.notification_server_switched_comparison,
+                            currentConfig.remarks.ifEmpty { "Unknown" },
+                            currentLatency,
+                            bestServer.remarks,
+                            bestServer.delay,
+                            improvement
+                        )
+                    } else {
+                        context.getString(
+                            R.string.notification_server_switched,
+                            bestServer.remarks,
+                            bestServer.delay
+                        )
+                    }
+
+                    Log.i(AppConfig.TAG, "Health monitor switched: $message")
+
+                    // Reset baseline for new server
+                    resetBaseline()
+                }
+            }
+        }
     }
 
     fun isMonitoring(): Boolean = isMonitoring.get()

@@ -4,12 +4,17 @@ import android.content.Intent
 import android.content.res.ColorStateList
 import android.net.Uri
 import android.net.VpnService
+import android.os.Build
 import android.os.Bundle
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.util.Log
 import android.view.KeyEvent
 import android.view.Menu
 import android.view.MenuItem
 import android.view.animation.AnimationUtils
+import android.widget.PopupMenu
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
@@ -17,6 +22,7 @@ import androidx.appcompat.app.ActionBarDrawerToggle
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.widget.SearchView
 import androidx.core.content.ContextCompat
+import androidx.core.content.getSystemService
 import androidx.core.view.GravityCompat
 import androidx.core.view.isVisible
 import androidx.lifecycle.lifecycleScope
@@ -97,6 +103,10 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
 
         binding.fab.setOnClickListener { handleFabAction() }
         binding.fabSmartConnect.setOnClickListener { handleSmartConnect() }
+        binding.fabSmartConnect.setOnLongClickListener {
+            showSmartConnectMenu()
+            true
+        }
         binding.layoutTest.setOnClickListener { handleLayoutTestClick() }
 
         setupGroupTab()
@@ -154,6 +164,40 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
     private var isSmartConnecting = false
     private val rotateAnimation by lazy { AnimationUtils.loadAnimation(this, R.anim.rotate_infinite) }
 
+    private enum class HapticType {
+        FIRST_FOUND,    // Short pulse when first working server found
+        CONNECTED,      // Medium pulse when connected
+        BETTER_FOUND,   // Double-tap pattern when switching to better server
+        ERROR           // Long pulse on error
+    }
+
+    private fun performHapticFeedback(type: HapticType) {
+        val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            getSystemService<VibratorManager>()?.defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            getSystemService<Vibrator>()
+        } ?: return
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val effect = when (type) {
+                HapticType.FIRST_FOUND -> VibrationEffect.createOneShot(50, VibrationEffect.DEFAULT_AMPLITUDE)
+                HapticType.CONNECTED -> VibrationEffect.createOneShot(100, VibrationEffect.DEFAULT_AMPLITUDE)
+                HapticType.BETTER_FOUND -> VibrationEffect.createWaveform(longArrayOf(0, 30, 50, 30), -1)
+                HapticType.ERROR -> VibrationEffect.createOneShot(200, VibrationEffect.DEFAULT_AMPLITUDE)
+            }
+            vibrator.vibrate(effect)
+        } else {
+            @Suppress("DEPRECATION")
+            when (type) {
+                HapticType.FIRST_FOUND -> vibrator.vibrate(50)
+                HapticType.CONNECTED -> vibrator.vibrate(100)
+                HapticType.BETTER_FOUND -> vibrator.vibrate(longArrayOf(0, 30, 50, 30), -1)
+                HapticType.ERROR -> vibrator.vibrate(200)
+            }
+        }
+    }
+
     private fun startSmartConnectAnimation() {
         binding.fabSmartConnect.startAnimation(rotateAnimation)
     }
@@ -203,6 +247,7 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
                             startV2RayWithPermissionCheck()
                         }
 
+                        performHapticFeedback(HapticType.FIRST_FOUND)
                         toast(getString(R.string.smart_connect_connected, server.remarks, server.delay))
                         setTestState(getString(R.string.smart_connect_optimizing))
                     }
@@ -219,6 +264,7 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
                             restartV2Ray()
                         }
 
+                        performHapticFeedback(HapticType.BETTER_FOUND)
                         toast(getString(R.string.smart_connect_switched, betterServer.remarks, betterServer.delay))
                     }
                 },
@@ -238,12 +284,80 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
                                     restartV2Ray()
                                 }
                             }
+                            performHapticFeedback(HapticType.CONNECTED)
                             setTestState(getString(R.string.smart_connect_complete, bestServer.delay))
                         } else if (!connectedToFirst) {
+                            performHapticFeedback(HapticType.ERROR)
                             toastError(R.string.smart_connect_no_servers)
                             setTestState("")
                         } else {
                             setTestState("")
+                        }
+                    }
+                }
+            )
+        }
+    }
+
+    private fun showSmartConnectMenu() {
+        val popup = PopupMenu(this, binding.fabSmartConnect)
+        popup.menuInflater.inflate(R.menu.menu_smart_connect, popup.menu)
+        popup.setOnMenuItemClickListener { item ->
+            when (item.itemId) {
+                R.id.smart_connect_test_all -> {
+                    testAllWithoutConnect()
+                    true
+                }
+                R.id.smart_connect_clear_cache -> {
+                    BackgroundServerTester.clearCache()
+                    toast(R.string.toast_success)
+                    true
+                }
+                R.id.smart_connect_settings -> {
+                    requestActivityLauncher.launch(Intent(this, SettingsActivity::class.java))
+                    true
+                }
+                else -> false
+            }
+        }
+        popup.show()
+    }
+
+    private fun testAllWithoutConnect() {
+        if (isSmartConnecting) return
+        isSmartConnecting = true
+        startSmartConnectAnimation()
+        setTestState(getString(R.string.smart_connect_testing))
+
+        lifecycleScope.launch {
+            var bestResult: BackgroundServerTester.TestResult? = null
+            BackgroundServerTester.smartConnectWithCallbacks(
+                context = this@MainActivity,
+                subscriptionId = mainViewModel.subscriptionId,
+                onProgress = { tested, total ->
+                    runOnUiThread {
+                        setTestState(getString(R.string.smart_connect_progress, tested, total))
+                    }
+                },
+                onFirstWorking = { server ->
+                    if (bestResult == null || server.delay < bestResult!!.delay) {
+                        bestResult = server
+                    }
+                },
+                onBetterFound = { server ->
+                    bestResult = server
+                },
+                onComplete = { finalBest ->
+                    runOnUiThread {
+                        isSmartConnecting = false
+                        stopSmartConnectAnimation()
+                        mainViewModel.reloadServerList()
+                        if (finalBest != null) {
+                            setTestState(getString(R.string.smart_connect_test_complete, finalBest.remarks, finalBest.delay))
+                            toast(getString(R.string.smart_connect_test_complete, finalBest.remarks, finalBest.delay))
+                        } else {
+                            setTestState("")
+                            toastError(R.string.smart_connect_no_servers)
                         }
                     }
                 }

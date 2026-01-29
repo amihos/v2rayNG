@@ -262,6 +262,8 @@
     <string name="title_pref_auto_switch">Auto-switch to best server</string>
     <string name="summary_pref_auto_switch">Automatically switch when VPN is running</string>
     <string name="notification_server_switched">Switched to %1$s (%2$dms)</string>
+    <!-- Server switch comparison notification: old_name, old_latency, new_name, new_latency, improvement_percent -->
+    <string name="notification_server_switched_comparison">%1$s (%2$dms) → %3$s (%4$dms) • %5$d%% faster</string>
 
     <!-- Smart Connect Button -->
     <string name="smart_connect">Smart Connect</string>
@@ -274,6 +276,10 @@
     <string name="smart_connect_cancelled">Cancelled</string>
     <string name="smart_connect_success">Connected to %1$s (%2$dms)</string>
     <string name="smart_connect_no_servers">No working servers found</string>
+    <string name="smart_connect_test_all">Test All Servers</string>
+    <string name="smart_connect_clear_cache">Clear Cache</string>
+    <string name="smart_connect_settings">Settings</string>
+    <string name="smart_connect_test_complete">Best: %1$s (%2$dms)</string>
 
     <string name="title_core_loglevel">Log Level</string>
     <string name="title_outbound_domain_resolve_method">Outbound domain pre-resolve method</string>
