@@ -455,4 +455,11 @@
         <item>WebDAV</item>
     </string-array>
 
+    <!-- Empty state: Get config from Telegram -->
+    <string name="empty_state_title">No Servers Added</string>
+    <string name="empty_state_description">Get your server configuration from our Telegram bot to start using GoServer</string>
+    <string name="empty_state_telegram_title">Telegram Bot</string>
+    <string name="empty_state_telegram_button">Get Config from Telegram</string>
+    <string name="empty_state_manual_hint">Or add servers manually using the + menu above</string>
+
 </resources>

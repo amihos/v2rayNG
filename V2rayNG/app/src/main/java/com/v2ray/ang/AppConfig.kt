@@ -13,6 +13,11 @@ object AppConfig {
     const val  WEBDAV_BACKUP_DIR = "backups"
     const val  WEBDAV_BACKUP_FILE_NAME = "backup_ng.zip"
 
+    /** Support URLs. */
+    // Telegram bot deep link: opens bot and sends /start command with "app" parameter
+    // Format: https://t.me/botusername?start=param
+    const val TELEGRAM_SUPPORT_BOT_URL = "https://t.me/goserversupportbot?start=app"
+
     /** Legacy configuration keys. */
     const val ANG_CONFIG = "ang_config"
 

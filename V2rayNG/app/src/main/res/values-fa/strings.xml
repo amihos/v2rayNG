@@ -423,4 +423,11 @@
         <item>WebDAV</item>
     </string-array>
 
+    <!-- Empty state: Get config from Telegram -->
+    <string name="empty_state_title">هیچ سروری اضافه نشده</string>
+    <string name="empty_state_description">برای شروع استفاده از GoServer، کانفیگ سرور خود را از ربات تلگرام ما دریافت کنید</string>
+    <string name="empty_state_telegram_title">ربات تلگرام</string>
+    <string name="empty_state_telegram_button">دریافت کانفیگ از تلگرام</string>
+    <string name="empty_state_manual_hint">یا سرورها را به صورت دستی از منوی + بالا اضافه کنید</string>
+
 </resources>

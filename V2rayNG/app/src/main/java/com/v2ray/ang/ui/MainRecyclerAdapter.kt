@@ -1,7 +1,9 @@
 package com.v2ray.ang.ui
 
 import android.annotation.SuppressLint
+import android.content.Intent
 import android.graphics.Color
+import android.net.Uri
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -130,8 +132,42 @@ class MainRecyclerAdapter(
             holder.itemMainBinding.infoContainer.setOnClickListener {
                 adapterListener?.onSelectServer(guid)
             }
+        } else if (holder is FooterViewHolder) {
+            // Show empty state only when there are no servers
+            val isEmpty = data.isEmpty()
+            holder.itemFooterBinding.layoutEmptyState.visibility = if (isEmpty) View.VISIBLE else View.GONE
+
+            if (isEmpty) {
+                // Set up Telegram bot button click
+                holder.itemFooterBinding.btnTelegramBot.setOnClickListener {
+                    openTelegramBot(holder.itemFooterBinding.root.context)
+                }
+            }
         }
- 
+    }
+
+    /**
+     * Opens the Telegram bot with a deep link
+     * Uses https://t.me/botusername?start=app format which:
+     * - Opens Telegram app if installed
+     * - Falls back to browser if not installed
+     * - Automatically sends /start command to the bot
+     */
+    private fun openTelegramBot(context: android.content.Context) {
+        val telegramBotUrl = AppConfig.TELEGRAM_SUPPORT_BOT_URL
+        try {
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(telegramBotUrl))
+            context.startActivity(intent)
+        } catch (e: Exception) {
+            // Fallback: try with browser
+            try {
+                val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(telegramBotUrl))
+                browserIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(browserIntent)
+            } catch (e2: Exception) {
+                // Could not open link
+            }
+        }
     }
 
     /**
