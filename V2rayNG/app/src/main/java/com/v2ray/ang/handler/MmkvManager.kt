@@ -196,6 +196,18 @@ object MmkvManager {
     }
 
     /**
+     * Encodes the server affiliation information directly.
+     * Use this for updating connection stability metrics without changing test results.
+     *
+     * @param guid The server GUID.
+     * @param info The server affiliation information to store.
+     */
+    fun encodeServerAffiliationInfo(guid: String, info: ServerAffiliationInfo) {
+        if (guid.isBlank()) return
+        serverAffStorage.encode(guid, JsonUtil.toJson(info))
+    }
+
+    /**
      * Encodes the server test delay in milliseconds.
      * Also tracks historical success/failure counts for reliability scoring.
      *
@@ -211,8 +223,8 @@ object MmkvManager {
         aff.testDelayMillis = testResult
         aff.lastTestTime = System.currentTimeMillis()
         aff.testSource = testSource
-        // Track historical success/failure with timestamps for time-decay scoring
-        aff.recordResult(success = testResult > 0)
+        // Track historical success/failure with timestamps and latency for scoring
+        aff.recordResult(success = testResult > 0, latencyMs = testResult)
         serverAffStorage.encode(guid, JsonUtil.toJson(aff))
     }
 

@@ -18,6 +18,7 @@ import androidx.annotation.RequiresApi
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.AppConfig.LOOPBACK
 import com.v2ray.ang.BuildConfig
+import com.v2ray.ang.handler.BackgroundServerTester
 import com.v2ray.ang.handler.MmkvManager
 import com.v2ray.ang.handler.NotificationManager
 import com.v2ray.ang.handler.SettingsManager
@@ -30,6 +31,8 @@ class V2RayVpnService : VpnService(), ServiceControl {
     private lateinit var mInterface: ParcelFileDescriptor
     private var isRunning = false
     private var tun2SocksService: Tun2SocksControl? = null
+    private var currentServerGuid: String? = null
+    private var wasStoppedByUser = false
 
     /**destroy
      * Unfortunately registerDefaultNetworkCallback is going to return our VPN interface: https://android.googlesource.com/platform/frameworks/base/+/dda156ab0c5d66ad82bdcf76cda07cbc0a9c8a2e
@@ -105,10 +108,24 @@ class V2RayVpnService : VpnService(), ServiceControl {
             Log.e(AppConfig.TAG, "Failed to create VPN interface")
             return
         }
+        // Track connection start for stability scoring
+        currentServerGuid = MmkvManager.getSelectServer()
+        currentServerGuid?.let { guid ->
+            MmkvManager.decodeServerAffiliationInfo(guid)?.let { info ->
+                info.recordConnectionStart()
+                MmkvManager.encodeServerAffiliationInfo(guid, info)
+            }
+        }
+        wasStoppedByUser = false
+
+        // Register network change callback for auto-testing on connectivity changes
+        BackgroundServerTester.registerNetworkChangeCallback(this)
+
         V2RayServiceManager.startCoreLoop(mInterface)
     }
 
     override fun stopService() {
+        wasStoppedByUser = true
         stopV2Ray(true)
     }
 
@@ -319,10 +336,20 @@ class V2RayVpnService : VpnService(), ServiceControl {
      * @param isForced Whether to force stop the service.
      */
     private fun stopV2Ray(isForced: Boolean = true) {
-//        val configName = defaultDPreference.getPrefString(PREF_CURR_CONFIG_GUID, "")
-//        val emptyInfo = VpnNetworkInfo()
-//        val info = loadVpnNetworkInfo(configName, emptyInfo)!! + (lastNetworkInfo ?: emptyInfo)
-//        saveVpnNetworkInfo(configName, info)
+        // Unregister network change callback
+        BackgroundServerTester.unregisterNetworkChangeCallback(this)
+
+        // Track connection end for stability scoring
+        currentServerGuid?.let { guid ->
+            MmkvManager.decodeServerAffiliationInfo(guid)?.let { info ->
+                // If not stopped by user, it was an unexpected drop
+                info.recordConnectionEnd(wasUnexpected = !wasStoppedByUser)
+                MmkvManager.encodeServerAffiliationInfo(guid, info)
+                Log.d(AppConfig.TAG, "Connection ended for $guid, wasUnexpected=${!wasStoppedByUser}")
+            }
+        }
+        currentServerGuid = null
+
         isRunning = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             try {

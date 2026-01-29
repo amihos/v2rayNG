@@ -61,6 +61,18 @@ object AppConfig {
     const val UNKNOWN_THRESHOLD_HOURS = 24L       // Results older than 24h are "unknown"
     const val MAX_RECENT_EVENTS = 20              // Keep last 20 success/failure events per server
     const val EVENT_EXPIRY_DAYS = 7               // Drop events older than 7 days
+
+    /** Latency jitter detection settings. */
+    const val MAX_RECENT_LATENCIES = 5            // Keep last 5 latency measurements for jitter calc
+    const val JITTER_PENALTY_FACTOR = 0.5         // How much jitter affects score (0.5 = 50% weight)
+
+    /** Connection stability settings. */
+    const val DROP_PENALTY_PER_HOUR = 0.1         // Score penalty per drop per hour of connection
+
+    /** Battery-aware testing settings. */
+    const val PREF_BATTERY_SAVER_ENABLED = "pref_battery_saver_enabled"
+    const val BATTERY_LOW_THRESHOLD = 20          // Skip background tests below 20%
+    const val BATTERY_CRITICAL_THRESHOLD = 10     // Disable all background tests below 10%
     const val PREF_SPEED_ENABLED = "pref_speed_enabled"
     const val PREF_CONFIRM_REMOVE = "pref_confirm_remove"
     const val PREF_START_SCAN_IMMEDIATE = "pref_start_scan_immediate"

@@ -3,7 +3,10 @@ package com.v2ray.ang.handler
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.os.BatteryManager
 import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -21,9 +24,11 @@ import androidx.work.multiprocess.RemoteWorkManager
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.R
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -102,6 +107,69 @@ object BackgroundServerTester {
     // Flag to allow cancellation of Smart Connect
     private val smartConnectCancelled = AtomicBoolean(false)
 
+    // Common health tracking base for regions, protocols, and time-of-day stats
+    private open class HealthTracker(
+        var successCount: Int = 0,
+        var failureCount: Int = 0,
+        var lastUpdateTime: Long = 0L,
+        private val maxEvents: Int = 100,
+        private val decayFactor: Double = 0.8,
+        private val defaultRate: Double = 0.5
+    ) {
+        val total: Int get() = successCount + failureCount
+
+        fun getSuccessRate(): Double =
+            if (total == 0) defaultRate else successCount.toDouble() / total
+
+        fun getFailureRate(): Double = 1.0 - getSuccessRate()
+
+        fun recordResult(success: Boolean) {
+            if (success) successCount++ else failureCount++
+            lastUpdateTime = System.currentTimeMillis()
+            decayIfOverLimit()
+        }
+
+        private fun decayIfOverLimit() {
+            if (total > maxEvents) {
+                successCount = (successCount * decayFactor).toInt()
+                failureCount = (failureCount * decayFactor).toInt()
+            }
+        }
+
+        fun decayByTime(thresholdHours: Int = 1, factor: Double = 0.5) {
+            val ageHours = (System.currentTimeMillis() - lastUpdateTime) / (3600 * 1000)
+            if (ageHours >= thresholdHours && total > 0) {
+                successCount = (successCount * factor).toInt()
+                failureCount = (failureCount * factor).toInt()
+            }
+        }
+    }
+
+    // Region health tracking for geographic diversity
+    private class RegionHealth : HealthTracker(maxEvents = 50, defaultRate = 1.0)
+
+    private val regionHealthMap = mutableMapOf<String, RegionHealth>()
+    private const val REGION_FAILURE_THRESHOLD = 0.7
+
+    // Time-of-day pattern tracking (one HealthTracker per hour)
+    private class HourlyStats : HealthTracker(maxEvents = 50)
+
+    private val hourlyPerformanceMap = mutableMapOf<String, Array<HourlyStats>>()
+    private const val TIME_OF_DAY_BONUS_FACTOR = 0.2
+
+    // Protocol health tracking for fallback mechanism
+    private class ProtocolHealth : HealthTracker(maxEvents = 100) {
+        fun isBlocked(): Boolean = total >= 5 && getSuccessRate() < 0.2
+    }
+
+    private val protocolHealthMap = mutableMapOf<String, ProtocolHealth>()
+    private const val PROTOCOL_FAILURE_THRESHOLD = 0.6
+    private const val PROTOCOL_BLOCKED_PENALTY = 1.5
+
+    // Network change callback for auto-testing (#3)
+    private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
+    private var isNetworkCallbackRegistered = false
+
     /**
      * Server selector with exploration budget for volatile networks.
      *
@@ -134,7 +202,7 @@ object BackgroundServerTester {
 
             // Sort known good by decayed score (best first)
             val sortedGood = knownGood.sortedBy { guid ->
-                MmkvManager.decodeServerAffiliationInfo(guid)?.getDecayedWeightedScore() ?: Double.MAX_VALUE
+                MmkvManager.decodeServerAffiliationInfo(guid)?.getComprehensiveScore() ?: Double.MAX_VALUE
             }
 
             // Sort exploration candidates by staleness (oldest first - most likely to have changed)
@@ -152,28 +220,26 @@ object BackgroundServerTester {
             return interleaveExploration(exploitation, exploration)
         }
 
+        private enum class ServerCategory { KNOWN_GOOD, STALE, FAILED_OR_UNKNOWN }
+
         /**
          * Categorize servers into: knownGood, stale, failedOrUnknown
          */
         private fun categorizeServers(guids: List<String>): Triple<List<String>, List<String>, List<String>> {
-            val knownGood = mutableListOf<String>()
-            val stale = mutableListOf<String>()
-            val failedOrUnknown = mutableListOf<String>()
-
-            for (guid in guids) {
+            val categorized = guids.groupBy { guid ->
                 val info = MmkvManager.decodeServerAffiliationInfo(guid)
                 when {
-                    // Never tested or very old
-                    info == null || info.isUnknown() -> failedOrUnknown.add(guid)
-                    // Last test failed
-                    info.testDelayMillis <= 0 -> failedOrUnknown.add(guid)
-                    // Successful but stale (>6h old)
-                    info.isStale() -> stale.add(guid)
-                    // Recent successful test
-                    else -> knownGood.add(guid)
+                    info == null || info.isUnknown() -> ServerCategory.FAILED_OR_UNKNOWN
+                    info.testDelayMillis <= 0 -> ServerCategory.FAILED_OR_UNKNOWN
+                    info.isStale() -> ServerCategory.STALE
+                    else -> ServerCategory.KNOWN_GOOD
                 }
             }
-            return Triple(knownGood, stale, failedOrUnknown)
+            return Triple(
+                categorized[ServerCategory.KNOWN_GOOD].orEmpty(),
+                categorized[ServerCategory.STALE].orEmpty(),
+                categorized[ServerCategory.FAILED_OR_UNKNOWN].orEmpty()
+            )
         }
 
         /**
@@ -193,19 +259,16 @@ object BackgroundServerTester {
 
             val result = mutableListOf<String>()
             val interval = (exploitation.size / (exploration.size + 1)).coerceAtLeast(1)
-            var exploreIndex = 0
+            val explorationIterator = exploration.iterator()
 
-            for ((i, server) in exploitation.withIndex()) {
+            exploitation.forEachIndexed { index, server ->
                 result.add(server)
-                // Insert exploration server at regular intervals
-                if ((i + 1) % interval == 0 && exploreIndex < exploration.size) {
-                    result.add(exploration[exploreIndex++])
+                if ((index + 1) % interval == 0 && explorationIterator.hasNext()) {
+                    result.add(explorationIterator.next())
                 }
             }
             // Add any remaining exploration servers at the end
-            while (exploreIndex < exploration.size) {
-                result.add(exploration[exploreIndex++])
-            }
+            explorationIterator.forEachRemaining { result.add(it) }
             return result
         }
     }
@@ -246,25 +309,377 @@ object BackgroundServerTester {
         Log.i(AppConfig.TAG, "Smart Connect cache cleared")
     }
 
+    // ==================== Battery-Aware Testing (#7) ====================
+
+    /**
+     * Get current battery level as percentage (0-100).
+     */
+    private fun getBatteryLevel(context: Context): Int {
+        val batteryIntent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val level = batteryIntent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = batteryIntent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+        return if (level >= 0 && scale > 0) (level * 100 / scale) else 100
+    }
+
+    /**
+     * Check if device is currently charging.
+     */
+    private fun isCharging(context: Context): Boolean {
+        val batteryIntent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val status = batteryIntent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+        return status == BatteryManager.BATTERY_STATUS_CHARGING ||
+               status == BatteryManager.BATTERY_STATUS_FULL
+    }
+
+    /**
+     * Check if background testing should proceed based on battery level.
+     * @return true if testing should proceed, false if battery is too low.
+     */
+    private fun shouldProceedWithTesting(context: Context): Boolean {
+        // Skip battery check if disabled in settings
+        if (!MmkvManager.decodeSettingsBool(AppConfig.PREF_BATTERY_SAVER_ENABLED, true)) {
+            return true
+        }
+
+        // Always allow if charging
+        if (isCharging(context)) return true
+
+        val batteryLevel = getBatteryLevel(context)
+
+        // Critical battery - skip all background testing
+        if (batteryLevel < AppConfig.BATTERY_CRITICAL_THRESHOLD) {
+            Log.i(AppConfig.TAG, "Battery critical ($batteryLevel%), skipping background test")
+            return false
+        }
+
+        // Low battery - skip background tests (but allow manual Smart Connect)
+        if (batteryLevel < AppConfig.BATTERY_LOW_THRESHOLD) {
+            Log.i(AppConfig.TAG, "Battery low ($batteryLevel%), reducing background test frequency")
+            // Return false for periodic tests, caller can override for manual tests
+            return false
+        }
+
+        return true
+    }
+
+    // ==================== Network Change Auto-Test (#3) ====================
+
+    /**
+     * Register network change callback to auto-test when network changes.
+     * Call this when VPN service starts.
+     */
+    fun registerNetworkChangeCallback(context: Context) {
+        if (isNetworkCallbackRegistered) return
+
+        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+            ?: return
+
+        networkCallback = object : android.net.ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: android.net.Network) {
+                Log.d(AppConfig.TAG, "Network changed: onAvailable")
+                // Don't test immediately on available, wait for capabilities
+            }
+
+            override fun onCapabilitiesChanged(
+                network: android.net.Network,
+                networkCapabilities: android.net.NetworkCapabilities
+            ) {
+                Log.d(AppConfig.TAG, "Network capabilities changed, triggering connection test")
+                // Test current connection when network changes
+                testCurrentConnectionAsync(context)
+            }
+
+            override fun onLost(network: android.net.Network) {
+                Log.d(AppConfig.TAG, "Network lost")
+            }
+        }
+
+        try {
+            val request = android.net.NetworkRequest.Builder()
+                .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build()
+            connectivityManager.registerNetworkCallback(request, networkCallback!!)
+            isNetworkCallbackRegistered = true
+            Log.i(AppConfig.TAG, "Network change callback registered")
+        } catch (e: Exception) {
+            Log.e(AppConfig.TAG, "Failed to register network callback", e)
+        }
+    }
+
+    /**
+     * Unregister network change callback.
+     * Call this when VPN service stops.
+     */
+    fun unregisterNetworkChangeCallback(context: Context) {
+        if (!isNetworkCallbackRegistered || networkCallback == null) return
+
+        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+            ?: return
+
+        try {
+            connectivityManager.unregisterNetworkCallback(networkCallback!!)
+            isNetworkCallbackRegistered = false
+            networkCallback = null
+            Log.i(AppConfig.TAG, "Network change callback unregistered")
+        } catch (e: Exception) {
+            Log.e(AppConfig.TAG, "Failed to unregister network callback", e)
+        }
+    }
+
+    /**
+     * Test current server connection asynchronously.
+     * If it fails, trigger Smart Connect to find a working server.
+     */
+    private fun testCurrentConnectionAsync(context: Context) {
+        if (!V2RayServiceManager.isRunning()) return
+
+        kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
+            val currentGuid = MmkvManager.getSelectServer() ?: return@launch
+            val testUrl = SettingsManager.getDelayTestUrl()
+
+            Log.i(AppConfig.TAG, "Testing current server after network change...")
+
+            val result = try {
+                val config = V2rayConfigManager.getV2rayConfig4Speedtest(context, currentGuid)
+                if (config.status) {
+                    V2RayNativeManager.measureOutboundDelay(config.content, testUrl)
+                } else -1L
+            } catch (e: Exception) {
+                Log.e(AppConfig.TAG, "Network change test failed", e)
+                -1L
+            }
+
+            if (result > 0) {
+                Log.i(AppConfig.TAG, "Current server still working after network change: ${result}ms")
+            } else {
+                Log.w(AppConfig.TAG, "Current server failed after network change, triggering Smart Connect")
+                // Clear cache and trigger immediate reconnect
+                clearCache()
+                val subscriptionId = MmkvManager.decodeSettingsString(AppConfig.CACHE_SUBSCRIPTION_ID, "") ?: ""
+                triggerImmediateTest(context, subscriptionId)
+            }
+        }
+    }
+
+    // ==================== Geographic Diversity Fallback (#9) ====================
+
+    /**
+     * Record test result for region health tracking.
+     */
+    fun recordRegionResult(region: String?, success: Boolean) {
+        if (region == null) return
+
+        val health = regionHealthMap.getOrPut(region) { RegionHealth() }
+        health.decayByTime()
+        health.recordResult(success)
+
+        Log.d(AppConfig.TAG, "Region $region: ${health.total} tests, ${(health.getSuccessRate() * 100).toInt()}% success")
+    }
+
+    /**
+     * Get region health penalty multiplier.
+     * Unhealthy regions get a penalty, making their servers less likely to be selected.
+     *
+     * @return Multiplier: 1.0 for healthy regions, up to 1.6 for very unhealthy regions.
+     */
+    fun getRegionPenalty(region: String?): Double {
+        if (region == null) return 1.0
+
+        val health = regionHealthMap[region] ?: return 1.0
+        health.decayByTime()
+
+        val failureRate = health.getFailureRate()
+        if (failureRate < REGION_FAILURE_THRESHOLD) return 1.0
+
+        // Penalty: 70% failure = 1.0x, 100% failure = 1.6x
+        return 1.0 + (failureRate - REGION_FAILURE_THRESHOLD) * 2.0
+    }
+
+    /**
+     * Check if a region is considered unhealthy (>70% failure rate).
+     */
+    fun isRegionUnhealthy(region: String?): Boolean {
+        if (region == null) return false
+        val health = regionHealthMap[region] ?: return false
+        return health.getFailureRate() >= REGION_FAILURE_THRESHOLD
+    }
+
+    /**
+     * Get summary of region health for logging.
+     */
+    fun getRegionHealthSummary(): String {
+        if (regionHealthMap.isEmpty()) return "No region data"
+
+        return regionHealthMap.entries
+            .sortedByDescending { it.value.getFailureRate() }
+            .take(5)
+            .joinToString(", ") { (region, health) ->
+                "$region: ${(health.getSuccessRate() * 100).toInt()}%"
+            }
+    }
+
+    // ==================== Time-of-Day Pattern Learning (#2) ====================
+
+    /**
+     * Record test result for time-of-day pattern learning.
+     * Tracks which servers perform well at which hours.
+     */
+    private fun recordTimeOfDayResult(serverGuid: String, success: Boolean) {
+        val hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
+
+        val hourlyStats = hourlyPerformanceMap.getOrPut(serverGuid) {
+            Array(24) { HourlyStats() }
+        }
+        hourlyStats[hour].recordResult(success)
+
+        Log.d(AppConfig.TAG, "Time-of-day: $serverGuid at hour $hour: ${(hourlyStats[hour].getSuccessRate() * 100).toInt()}% success")
+    }
+
+    /**
+     * Get time-of-day bonus/penalty multiplier for a server.
+     * Servers with good history at the current hour get a bonus (lower score).
+     * Servers with poor history at the current hour get a penalty (higher score).
+     *
+     * @return Multiplier: <1.0 for bonus, 1.0 for neutral, >1.0 for penalty.
+     */
+    fun getTimeOfDayMultiplier(serverGuid: String): Double {
+        val hourlyStats = hourlyPerformanceMap[serverGuid] ?: return 1.0
+        val hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
+        val stats = hourlyStats[hour]
+
+        // Need at least 3 data points to be meaningful
+        if (stats.successCount + stats.failureCount < 3) return 1.0
+
+        val successRate = stats.getSuccessRate()
+        // successRate = 1.0 -> multiplier = 1.0 - 0.2 = 0.8 (20% bonus)
+        // successRate = 0.5 -> multiplier = 1.0 - 0 = 1.0 (neutral)
+        // successRate = 0.0 -> multiplier = 1.0 + 0.2 = 1.2 (20% penalty)
+        return 1.0 - (successRate - 0.5) * 2 * TIME_OF_DAY_BONUS_FACTOR
+    }
+
+    /**
+     * Get best hours for a server based on historical data.
+     * Returns up to 3 hours with highest success rates.
+     */
+    fun getBestHoursForServer(serverGuid: String): List<Int> {
+        val hourlyStats = hourlyPerformanceMap[serverGuid] ?: return emptyList()
+
+        return hourlyStats.indices
+            .filter { hourlyStats[it].successCount + hourlyStats[it].failureCount >= 3 }
+            .sortedByDescending { hourlyStats[it].getSuccessRate() }
+            .take(3)
+    }
+
+    /**
+     * Get time-of-day performance summary for logging.
+     */
+    fun getTimeOfDaySummary(): String {
+        if (hourlyPerformanceMap.isEmpty()) return "No time-of-day data"
+
+        val hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
+        val serversWithData = hourlyPerformanceMap.filter {
+            val stats = it.value[hour]
+            stats.successCount + stats.failureCount >= 3
+        }
+
+        if (serversWithData.isEmpty()) return "No data for hour $hour"
+
+        return "Hour $hour: ${serversWithData.size} servers with patterns, avg success " +
+                "${(serversWithData.values.map { it[hour].getSuccessRate() }.average() * 100).toInt()}%"
+    }
+
+    // ==================== Protocol Fallback Mechanism (#4) ====================
+
+    /**
+     * Record test result for protocol health tracking.
+     * Tracks which protocols work best for automatic fallback.
+     */
+    private fun recordProtocolResult(protocolName: String?, success: Boolean) {
+        if (protocolName.isNullOrBlank()) return
+
+        val health = protocolHealthMap.getOrPut(protocolName) { ProtocolHealth() }
+        health.recordResult(success)
+
+        val blockedSuffix = if (health.isBlocked()) " [BLOCKED]" else ""
+        Log.d(AppConfig.TAG, "Protocol $protocolName: ${(health.getSuccessRate() * 100).toInt()}% success$blockedSuffix")
+    }
+
+    /**
+     * Get protocol health penalty multiplier.
+     * Protocols with high failure rates get penalized, making their servers less likely to be selected.
+     *
+     * @return Multiplier: 1.0 for healthy protocols, up to 1.5 for likely-blocked protocols.
+     */
+    fun getProtocolPenalty(protocolName: String?): Double {
+        if (protocolName.isNullOrBlank()) return 1.0
+
+        val health = protocolHealthMap[protocolName] ?: return 1.0
+        if (health.total < 3) return 1.0
+
+        if (health.isBlocked()) return PROTOCOL_BLOCKED_PENALTY
+
+        val failureRate = health.getFailureRate()
+        if (failureRate < PROTOCOL_FAILURE_THRESHOLD) return 1.0
+
+        // Penalty: 60% failure = 1.0x, 100% failure = 1.4x
+        return 1.0 + (failureRate - PROTOCOL_FAILURE_THRESHOLD)
+    }
+
+    /**
+     * Check if a protocol is considered blocked (>80% failure rate).
+     */
+    fun isProtocolBlocked(protocolName: String?): Boolean {
+        if (protocolName.isNullOrBlank()) return false
+        val health = protocolHealthMap[protocolName] ?: return false
+        return health.isBlocked()
+    }
+
+    /**
+     * Get list of working protocols sorted by success rate.
+     */
+    fun getWorkingProtocols(): List<Pair<String, Double>> {
+        return protocolHealthMap.entries
+            .filter { it.value.total >= 3 && !it.value.isBlocked() }
+            .sortedByDescending { it.value.getSuccessRate() }
+            .map { it.key to it.value.getSuccessRate() }
+    }
+
+    /**
+     * Get protocol health summary for logging.
+     */
+    fun getProtocolHealthSummary(): String {
+        if (protocolHealthMap.isEmpty()) return "No protocol data"
+
+        val meaningful = protocolHealthMap.entries.filter { it.value.total >= 3 }
+        if (meaningful.isEmpty()) return "No meaningful protocol data yet"
+
+        return meaningful
+            .sortedByDescending { it.value.getSuccessRate() }
+            .joinToString(", ") { (protocol, health) ->
+                val status = when {
+                    health.isBlocked() -> " [BLOCKED]"
+                    health.getSuccessRate() < PROTOCOL_FAILURE_THRESHOLD -> " [weak]"
+                    else -> ""
+                }
+                "$protocol: ${(health.getSuccessRate() * 100).toInt()}%$status"
+            }
+    }
+
+    /**
+     * Get protocol name from server config.
+     */
+    private fun getProtocolName(serverGuid: String): String? {
+        val config = MmkvManager.decodeServerConfig(serverGuid) ?: return null
+        return config.configType?.protocolScheme
+    }
+
     /**
      * Stores a successful latency measurement for adaptive threshold calculation.
      */
     private fun recordLatencyHistory(latencyMs: Long) {
         if (latencyMs <= 0) return
 
-        val historyJson = MmkvManager.decodeSettingsString(KEY_LATENCY_HISTORY, "[]")
-        val history = try {
-            historyJson?.let {
-                it.removeSurrounding("[", "]")
-                    .split(",")
-                    .filter { s -> s.isNotBlank() }
-                    .map { s -> s.trim().toLong() }
-                    .toMutableList()
-            } ?: mutableListOf()
-        } catch (e: Exception) {
-            mutableListOf<Long>()
-        }
-
+        val history = parseLatencyHistory(MmkvManager.decodeSettingsString(KEY_LATENCY_HISTORY, null))
         history.add(latencyMs)
 
         // Keep only last MAX_HISTORY_SIZE entries
@@ -278,42 +693,40 @@ object BackgroundServerTester {
     }
 
     /**
+     * Parses latency history JSON string to a mutable list.
+     */
+    private fun parseLatencyHistory(historyJson: String?): MutableList<Long> {
+        if (historyJson.isNullOrBlank()) return mutableListOf()
+        return try {
+            historyJson.removeSurrounding("[", "]")
+                .split(",")
+                .filter { it.isNotBlank() }
+                .map { it.trim().toLong() }
+                .toMutableList()
+        } catch (e: Exception) {
+            mutableListOf()
+        }
+    }
+
+    /**
      * Calculates adaptive "good enough" threshold based on historical performance.
      * Uses 80th percentile of historical latencies, or default if insufficient data.
      */
     private fun getAdaptiveGoodEnoughThreshold(): Long {
         val historyJson = MmkvManager.decodeSettingsString(KEY_LATENCY_HISTORY, null)
-        if (historyJson.isNullOrBlank()) {
-            Log.d(AppConfig.TAG, "Smart Connect: No history, using default threshold ${DEFAULT_GOOD_ENOUGH_LATENCY}ms")
-            return DEFAULT_GOOD_ENOUGH_LATENCY
-        }
-
-        val history = try {
-            historyJson.removeSurrounding("[", "]")
-                .split(",")
-                .filter { it.isNotBlank() }
-                .map { it.trim().toLong() }
-                .filter { it > 0 }
-                .sorted()
-        } catch (e: Exception) {
-            Log.w(AppConfig.TAG, "Smart Connect: Failed to parse history", e)
-            return DEFAULT_GOOD_ENOUGH_LATENCY
-        }
+        val history = parseLatencyHistory(historyJson).filter { it > 0 }.sorted()
 
         if (history.size < 3) {
-            Log.d(AppConfig.TAG, "Smart Connect: Insufficient history (${history.size}), using default threshold")
+            Log.d(AppConfig.TAG, "Smart Connect: Insufficient history (${history.size}), using default threshold ${DEFAULT_GOOD_ENOUGH_LATENCY}ms")
             return DEFAULT_GOOD_ENOUGH_LATENCY
         }
 
-        // Calculate 80th percentile
+        // Calculate 80th percentile, clamped between 100ms and 1000ms
         val percentileIndex = (history.size * 0.8).toInt().coerceAtMost(history.size - 1)
-        val threshold = history[percentileIndex]
+        val threshold = history[percentileIndex].coerceIn(100L, 1000L)
+        Log.d(AppConfig.TAG, "Smart Connect: Adaptive threshold ${threshold}ms (80th percentile of ${history.size} samples)")
 
-        // Clamp threshold between 100ms and 1000ms
-        val clampedThreshold = threshold.coerceIn(100L, 1000L)
-        Log.d(AppConfig.TAG, "Smart Connect: Adaptive threshold ${clampedThreshold}ms (80th percentile of ${history.size} samples)")
-
-        return clampedThreshold
+        return threshold
     }
 
     /**
@@ -390,6 +803,12 @@ object BackgroundServerTester {
 
         override suspend fun doWork(): Result {
             Log.i(AppConfig.TAG, "Background server testing starting")
+
+            // Battery-aware testing: skip if battery is too low
+            if (!shouldProceedWithTesting(applicationContext)) {
+                Log.i(AppConfig.TAG, "Skipping background test due to low battery")
+                return Result.success()
+            }
 
             createNotificationChannel()
 
@@ -571,28 +990,50 @@ object BackgroundServerTester {
     ): TestResult? = withContext(Dispatchers.IO) {
         val config = MmkvManager.decodeServerConfig(guid) ?: return@withContext null
         val remarks = config.remarks.ifEmpty { guid }
+        val region = extractRegion(remarks)
+        val protocolName = config.configType?.protocolScheme
+
+        // Helper to record all health metrics at once
+        fun recordAllMetrics(success: Boolean) {
+            recordRegionResult(region, success)
+            recordTimeOfDayResult(guid, success)
+            recordProtocolResult(protocolName, success)
+        }
 
         try {
             val result = V2rayConfigManager.getV2rayConfig4Speedtest(context, guid)
             if (!result.status) {
                 Log.d(AppConfig.TAG, "Failed to get config for server $guid: ${result.content}")
+                recordAllMetrics(false)
                 return@withContext recordFailure(guid, remarks, testSource)
             }
 
             val delay = V2RayNativeManager.measureOutboundDelay(result.content, testUrl)
+            val success = delay > 0
+            recordAllMetrics(success)
+
             MmkvManager.encodeServerTestDelayMillis(guid, delay, testSource)
+
+            // Calculate comprehensive score with all modifiers
             val affiliationInfo = MmkvManager.decodeServerAffiliationInfo(guid)
-            // Use time-decayed scoring: old failures have less impact
-            val score = affiliationInfo?.getDecayedWeightedScore() ?: delay.toDouble()
+            val baseScore = affiliationInfo?.getComprehensiveScore() ?: delay.toDouble()
+            val score = baseScore *
+                getRegionPenalty(region) *
+                getTimeOfDayMultiplier(guid) *
+                getProtocolPenalty(protocolName)
+
             TestResult(guid, remarks, delay, score)
         } catch (e: java.net.SocketTimeoutException) {
             Log.d(AppConfig.TAG, "Server $guid timed out")
+            recordAllMetrics(false)
             recordFailure(guid, remarks, testSource)
         } catch (e: java.io.IOException) {
             Log.d(AppConfig.TAG, "Network error testing server $guid: ${e.message}")
+            recordAllMetrics(false)
             recordFailure(guid, remarks, testSource)
         } catch (e: Exception) {
             Log.e(AppConfig.TAG, "Unexpected error testing server $guid", e)
+            recordAllMetrics(false)
             recordFailure(guid, remarks, testSource)
         }
     }
@@ -601,7 +1042,7 @@ object BackgroundServerTester {
         MmkvManager.encodeServerTestDelayMillis(guid, -1L, testSource)
         val affiliationInfo = MmkvManager.decodeServerAffiliationInfo(guid)
         // Use time-decayed scoring: old failures have less impact
-        val score = affiliationInfo?.getDecayedWeightedScore() ?: Double.MAX_VALUE
+        val score = affiliationInfo?.getComprehensiveScore() ?: Double.MAX_VALUE
         return TestResult(guid, remarks, -1L, score)
     }
 

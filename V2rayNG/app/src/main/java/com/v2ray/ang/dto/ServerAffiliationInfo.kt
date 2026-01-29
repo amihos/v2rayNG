@@ -2,6 +2,7 @@ package com.v2ray.ang.dto
 
 import com.v2ray.ang.AppConfig
 import kotlin.math.pow
+import kotlin.math.sqrt
 
 /**
  * Server affiliation information including test results, reliability metrics,
@@ -21,7 +22,15 @@ data class ServerAffiliationInfo(
     // Time-stamped events for decay calculation
     // Each timestamp represents when a success/failure occurred
     var recentSuccesses: MutableList<Long> = mutableListOf(),
-    var recentFailures: MutableList<Long> = mutableListOf()
+    var recentFailures: MutableList<Long> = mutableListOf(),
+
+    // Latency jitter detection: store recent latency measurements
+    var recentLatencies: MutableList<Long> = mutableListOf(),
+
+    // Connection stability tracking
+    var connectionDropCount: Int = 0,
+    var totalConnectionTimeMs: Long = 0L,
+    var lastConnectionStartTime: Long = 0L
 ) {
     fun getTestDelayString(): String {
         if (testDelayMillis == 0L) {
@@ -142,27 +151,133 @@ data class ServerAffiliationInfo(
      * Automatically cleans up events older than EVENT_EXPIRY_DAYS.
      *
      * @param success true if the test succeeded (delay > 0), false otherwise.
+     * @param latencyMs the latency measurement (only recorded if > 0).
      */
-    fun recordResult(success: Boolean) {
+    fun recordResult(success: Boolean, latencyMs: Long = 0L) {
         val now = System.currentTimeMillis()
         val cutoff = now - (AppConfig.EVENT_EXPIRY_DAYS * 24 * 3600 * 1000L)
+        val targetList = if (success) recentSuccesses else recentFailures
 
-        if (success) {
-            recentSuccesses.add(now)
-            successCount++
-            // Trim to max size (remove oldest first)
-            while (recentSuccesses.size > AppConfig.MAX_RECENT_EVENTS) {
-                recentSuccesses.removeAt(0)
-            }
-            // Remove expired events
-            recentSuccesses.removeAll { it < cutoff }
-        } else {
-            recentFailures.add(now)
-            failureCount++
-            while (recentFailures.size > AppConfig.MAX_RECENT_EVENTS) {
-                recentFailures.removeAt(0)
-            }
-            recentFailures.removeAll { it < cutoff }
+        targetList.add(now)
+        if (success) successCount++ else failureCount++
+
+        // Trim to max size (remove oldest first)
+        while (targetList.size > AppConfig.MAX_RECENT_EVENTS) {
+            targetList.removeAt(0)
         }
+        // Remove expired events
+        targetList.removeAll { it < cutoff }
+
+        // Record latency for jitter calculation
+        if (latencyMs > 0) {
+            recentLatencies.add(latencyMs)
+            while (recentLatencies.size > AppConfig.MAX_RECENT_LATENCIES) {
+                recentLatencies.removeAt(0)
+            }
+        }
+    }
+
+    // ==================== Latency Jitter Detection (#8) ====================
+
+    /**
+     * Calculate the standard deviation (jitter) of recent latency measurements.
+     * High jitter indicates unstable connection even if average latency is good.
+     *
+     * @return Standard deviation in ms, or 0 if insufficient data.
+     */
+    fun getLatencyJitter(): Double {
+        if (recentLatencies.size < 2) return 0.0
+
+        val mean = recentLatencies.average()
+        val variance = recentLatencies.map { (it - mean).pow(2) }.average()
+        return sqrt(variance)
+    }
+
+    /**
+     * Get jitter as a ratio of mean latency (coefficient of variation).
+     * Values > 0.5 indicate high instability.
+     *
+     * @return Jitter ratio (0.0 = perfectly stable, 1.0 = jitter equals mean).
+     */
+    fun getJitterRatio(): Double {
+        if (recentLatencies.size < 2) return 0.0
+
+        val mean = recentLatencies.average()
+        return if (mean > 0) getLatencyJitter() / mean else 0.0
+    }
+
+    /**
+     * Calculate comprehensive score including jitter penalty.
+     * Servers with high jitter are penalized even if average latency is low.
+     *
+     * @return Score with jitter penalty applied, or Double.MAX_VALUE for failed servers.
+     */
+    fun getScoreWithJitter(): Double {
+        if (testDelayMillis <= 0) return Double.MAX_VALUE
+
+        val baseScore = getDecayedWeightedScore()
+        val jitterRatio = getJitterRatio()
+
+        // Apply jitter penalty: score * (1 + jitterRatio * penaltyFactor)
+        // Example: 200ms with 50% jitter ratio -> 200 * (1 + 0.5 * 0.5) = 250ms effective
+        return baseScore * (1.0 + jitterRatio * AppConfig.JITTER_PENALTY_FACTOR)
+    }
+
+    // ==================== Connection Stability (#10) ====================
+
+    /**
+     * Record that a connection was started.
+     * Call this when VPN connects to this server.
+     */
+    fun recordConnectionStart() {
+        lastConnectionStartTime = System.currentTimeMillis()
+    }
+
+    /**
+     * Record that a connection ended (normally or dropped).
+     * Call this when VPN disconnects from this server.
+     *
+     * @param wasUnexpected true if connection dropped unexpectedly, false if user-initiated.
+     */
+    fun recordConnectionEnd(wasUnexpected: Boolean) {
+        if (lastConnectionStartTime > 0) {
+            val duration = System.currentTimeMillis() - lastConnectionStartTime
+            totalConnectionTimeMs += duration
+            lastConnectionStartTime = 0L
+
+            if (wasUnexpected) {
+                connectionDropCount++
+            }
+        }
+    }
+
+    /**
+     * Get the drop rate (drops per hour of connection time).
+     * Lower is better. 0 = never dropped.
+     *
+     * @return Drops per hour, or 0 if no connection history.
+     */
+    fun getDropsPerHour(): Double {
+        if (totalConnectionTimeMs <= 0) return 0.0
+        val hoursConnected = totalConnectionTimeMs / (3600.0 * 1000)
+        if (hoursConnected < 0.01) return 0.0  // Need at least ~36 seconds of data
+        return connectionDropCount / hoursConnected
+    }
+
+    /**
+     * Calculate comprehensive score including stability penalty.
+     * Servers that drop frequently are penalized.
+     *
+     * @return Score with stability and jitter penalties, or Double.MAX_VALUE for failed servers.
+     */
+    fun getComprehensiveScore(): Double {
+        if (testDelayMillis <= 0) return Double.MAX_VALUE
+
+        val scoreWithJitter = getScoreWithJitter()
+        val dropsPerHour = getDropsPerHour()
+
+        // Apply drop penalty: score * (1 + dropsPerHour * penaltyFactor)
+        // Example: 200ms score with 2 drops/hour -> 200 * (1 + 2 * 0.1) = 240ms effective
+        return scoreWithJitter * (1.0 + dropsPerHour * AppConfig.DROP_PENALTY_PER_HOUR)
     }
 }
