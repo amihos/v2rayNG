@@ -124,10 +124,7 @@ class SettingsActivity : BaseActivity() {
                 autoSwitchCheck?.isEnabled = enabled
 
                 if (enabled) {
-                    val interval = MmkvManager.decodeSettingsString(
-                        AppConfig.PREF_AUTO_SERVER_TEST_INTERVAL,
-                        AppConfig.DEFAULT_AUTO_TEST_INTERVAL
-                    )?.toLongOrNull() ?: 60L
+                    val interval = autoTestInterval?.value?.toLongOrNull() ?: 60L
                     configureAutoTestTask(interval)
                 } else {
                     cancelAutoTestTask()
@@ -142,7 +139,7 @@ class SettingsActivity : BaseActivity() {
                     lp.summary = if (idx >= 0) lp.entries[idx] else valueStr
                 }
 
-                if (MmkvManager.decodeSettingsBool(AppConfig.PREF_AUTO_SERVER_TEST_ENABLED, false)) {
+                if (MmkvManager.decodeSettingsBool(AppConfig.PREF_AUTO_SERVER_TEST_ENABLED, true)) {
                     configureAutoTestTask(valueStr.toLongOrNull() ?: 60L)
                 }
                 true
@@ -198,13 +195,13 @@ class SettingsActivity : BaseActivity() {
             updateMux(MmkvManager.decodeSettingsBool(AppConfig.PREF_MUX_ENABLED, false))
 
             // Initialize fragment-dependent UI states
-            updateFragment(MmkvManager.decodeSettingsBool(AppConfig.PREF_FRAGMENT_ENABLED, false))
+            updateFragment(MmkvManager.decodeSettingsBool(AppConfig.PREF_FRAGMENT_ENABLED, true))
 
             // Initialize auto-update interval state
-            autoUpdateInterval?.isEnabled = MmkvManager.decodeSettingsBool(AppConfig.SUBSCRIPTION_AUTO_UPDATE, false)
+            autoUpdateInterval?.isEnabled = MmkvManager.decodeSettingsBool(AppConfig.SUBSCRIPTION_AUTO_UPDATE, true)
 
             // Initialize auto-test settings state
-            val autoTestEnabled = MmkvManager.decodeSettingsBool(AppConfig.PREF_AUTO_SERVER_TEST_ENABLED, false)
+            val autoTestEnabled = MmkvManager.decodeSettingsBool(AppConfig.PREF_AUTO_SERVER_TEST_ENABLED, true)
             autoTestInterval?.isEnabled = autoTestEnabled
             autoSwitchCheck?.isEnabled = autoTestEnabled
         }

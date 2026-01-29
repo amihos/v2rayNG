@@ -13,8 +13,8 @@ import com.v2ray.ang.R
 import com.v2ray.ang.dto.EConfigType
 import com.v2ray.ang.dto.ProfileItem
 import com.v2ray.ang.extension.toast
+import com.v2ray.ang.service.HevLibraryChecker
 import com.v2ray.ang.service.ServiceControl
-import com.v2ray.ang.service.TProxyService
 import com.v2ray.ang.service.V2RayProxyOnlyService
 import com.v2ray.ang.service.V2RayVpnService
 import com.v2ray.ang.util.MessageUtil
@@ -161,12 +161,8 @@ object V2RayServiceManager {
         }
 
         currentConfig = config
-        var tunFd = vpnInterface?.fd ?: 0
-        // Only set tunFd to 0 if HevTun is enabled AND library is available
-        // Otherwise, pass FD to xray-core to handle TUN directly
-        if (SettingsManager.isUsingHevTun() && TProxyService.isLibraryAvailable()) {
-            tunFd = 0
-        }
+        val useHevTun = SettingsManager.isUsingHevTun() && HevLibraryChecker.isLibraryAvailable()
+        val tunFd = if (useHevTun) 0 else (vpnInterface?.fd ?: 0)
 
         try {
             coreController.startLoop(result.content, tunFd)

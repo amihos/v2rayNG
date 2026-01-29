@@ -24,8 +24,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -34,33 +32,18 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Handles periodic server testing and automatic server switching.
- * Uses WorkManager (RemoteWorkManager for multi-process support) for reliable background execution.
+ * Handles periodic server testing and automatic server switching via WorkManager.
  *
- * Smart Connect Algorithm:
- * 1. Test servers in batches (BATCH_SIZE at a time)
- * 2. Connect user to FIRST working server immediately
- * 3. Continue testing remaining servers in background
- * 4. Switch to better server if found (with threshold)
+ * Smart Connect: Tests servers in batches, connects to first working server immediately,
+ * then continues testing and switches to better servers if found.
  */
 object BackgroundServerTester {
 
-    // Notification ID for auto-switch notifications (4 to avoid collision with VPN=1, subscription=3)
     private const val NOTIFICATION_ID = 4
-
-    // Switch threshold: switch if new server is 20% faster than current
     private const val SWITCH_THRESHOLD = 0.8
-
-    // Max parallelism for battery efficiency (lower = less battery drain)
     private const val MAX_PARALLELISM = 2
-
-    // Batch size for Smart Connect - test this many servers before checking for results
     private const val SMART_CONNECT_BATCH_SIZE = 10
-
-    // "Good enough" latency threshold - stop searching if we find a server this fast
     private const val GOOD_ENOUGH_LATENCY_MS = 300L
-
-    // Input data key for subscription ID
     private const val KEY_SUBSCRIPTION_ID = "subscription_id"
 
     // Mutex to prevent concurrent server switches
@@ -78,20 +61,14 @@ object BackgroundServerTester {
         val delay: Long
     )
 
-    /**
-     * Result holder for Smart Connect with progress tracking.
-     */
     data class SmartConnectResult(
-        val firstWorking: TestResult?,      // First working server (for immediate connection)
-        val bestServer: TestResult?,        // Best server found overall
-        val testedCount: Int,               // Number of servers tested
-        val totalCount: Int,                // Total servers to test
-        val isComplete: Boolean             // Whether all testing is done
+        val firstWorking: TestResult?,
+        val bestServer: TestResult?,
+        val testedCount: Int,
+        val totalCount: Int,
+        val isComplete: Boolean
     )
 
-    /**
-     * WorkManager task for background server testing and auto-switching.
-     */
     class TestAndSwitchTask(context: Context, params: WorkerParameters) :
         CoroutineWorker(context, params) {
 
@@ -151,23 +128,14 @@ object BackgroundServerTester {
                 .setPriority(NotificationCompat.PRIORITY_LOW)
         }
 
-        /**
-         * Checks if notification permission is granted (required for Android 13+).
-         */
         private fun hasNotificationPermission(): Boolean {
-            return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                ContextCompat.checkSelfPermission(
-                    applicationContext,
-                    android.Manifest.permission.POST_NOTIFICATIONS
-                ) == PackageManager.PERMISSION_GRANTED
-            } else {
-                true // Permission not required before Android 13
-            }
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return true
+            return ContextCompat.checkSelfPermission(
+                applicationContext,
+                android.Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
         }
 
-        /**
-         * Shows notification only if permission is granted.
-         */
         private fun showNotificationIfAllowed(text: String) {
             if (!hasNotificationPermission()) {
                 Log.d(AppConfig.TAG, "Notification permission not granted, skipping notification")
@@ -190,11 +158,7 @@ object BackgroundServerTester {
             }
         }
 
-        /**
-         * Handles auto-switching to a better server with synchronization to prevent race conditions.
-         */
         private suspend fun handleAutoSwitch(bestResult: TestResult) {
-            // Prevent concurrent switch operations
             if (!isSwitching.compareAndSet(false, true)) {
                 Log.i(AppConfig.TAG, "Switch already in progress, skipping")
                 return
@@ -202,21 +166,7 @@ object BackgroundServerTester {
 
             try {
                 switchMutex.withLock {
-                    val autoSwitchEnabled = MmkvManager.decodeSettingsBool(AppConfig.PREF_AUTO_SERVER_SWITCH_ENABLED, true)
-                    // Re-check current server inside the lock to prevent race condition
-                    val currentServer = MmkvManager.getSelectServer()
-
-                    if (!autoSwitchEnabled || !V2RayServiceManager.isRunning() || bestResult.guid == currentServer) {
-                        return@withLock
-                    }
-
-                    val currentDelay = MmkvManager.decodeServerAffiliationInfo(currentServer ?: "")?.testDelayMillis ?: Long.MAX_VALUE
-                    val shouldSwitch = currentDelay <= 0 || bestResult.delay < currentDelay * SWITCH_THRESHOLD
-
-                    if (!shouldSwitch) {
-                        Log.i(AppConfig.TAG, "Current server is good enough, not switching")
-                        return@withLock
-                    }
+                    if (!shouldPerformSwitch(bestResult)) return@withLock
 
                     val switched = V2RayServiceManager.switchServer(applicationContext, bestResult.guid)
                     if (switched) {
@@ -234,15 +184,27 @@ object BackgroundServerTester {
                 isSwitching.set(false)
             }
         }
+
+        private fun shouldPerformSwitch(bestResult: TestResult): Boolean {
+            val autoSwitchEnabled = MmkvManager.decodeSettingsBool(AppConfig.PREF_AUTO_SERVER_SWITCH_ENABLED, true)
+            val currentServer = MmkvManager.getSelectServer()
+
+            if (!autoSwitchEnabled || !V2RayServiceManager.isRunning() || bestResult.guid == currentServer) {
+                return false
+            }
+
+            val currentDelay = MmkvManager.decodeServerAffiliationInfo(currentServer ?: "")?.testDelayMillis ?: Long.MAX_VALUE
+            val shouldSwitch = currentDelay <= 0 || bestResult.delay < currentDelay * SWITCH_THRESHOLD
+
+            if (!shouldSwitch) {
+                Log.i(AppConfig.TAG, "Current server is good enough, not switching")
+            }
+            return shouldSwitch
+        }
     }
 
     /**
-     * Tests all servers and returns results.
-     *
-     * @param context Application context (should be applicationContext to avoid leaks).
-     * @param serverGuids The list of server GUIDs to test.
-     * @param testSource The source of the test (manual, background, post-sub, smart_connect).
-     * @return A list of test results.
+     * Tests all servers with limited parallelism for battery efficiency.
      */
     suspend fun testServers(
         context: Context,
@@ -252,7 +214,6 @@ object BackgroundServerTester {
         val appContext = context.applicationContext
         val testUrl = SettingsManager.getDelayTestUrl()
 
-        // Use limited parallelism (MAX_PARALLELISM) to be battery-efficient
         serverGuids.chunked(MAX_PARALLELISM).flatMap { chunk ->
             chunk.map { guid ->
                 async(Dispatchers.IO) {
@@ -262,87 +223,57 @@ object BackgroundServerTester {
         }.filterNotNull()
     }
 
-    /**
-     * Tests a single server and returns the result.
-     *
-     * @param context Application context.
-     * @param guid Server GUID to test.
-     * @param testUrl URL to use for delay measurement.
-     * @param testSource Source identifier for logging/tracking.
-     * @return TestResult or null if server config not found.
-     */
     private suspend fun testSingleServer(
         context: Context,
         guid: String,
         testUrl: String,
         testSource: String
     ): TestResult? = withContext(Dispatchers.IO) {
-        try {
-            val config = MmkvManager.decodeServerConfig(guid) ?: return@withContext null
-            val remarks = config.remarks ?: guid
+        val config = MmkvManager.decodeServerConfig(guid) ?: return@withContext null
+        val remarks = config.remarks ?: guid
 
-            // Get the speedtest config
+        try {
             val result = V2rayConfigManager.getV2rayConfig4Speedtest(context, guid)
             if (!result.status) {
                 Log.d(AppConfig.TAG, "Failed to get config for server $guid: ${result.content}")
-                MmkvManager.encodeServerTestDelayMillis(guid, -1L, testSource)
-                return@withContext TestResult(guid, remarks, -1L)
+                return@withContext recordFailure(guid, remarks, testSource)
             }
 
-            // Measure delay using native library
             val delay = V2RayNativeManager.measureOutboundDelay(result.content, testUrl)
             MmkvManager.encodeServerTestDelayMillis(guid, delay, testSource)
-
             TestResult(guid, remarks, delay)
         } catch (e: java.net.SocketTimeoutException) {
             Log.d(AppConfig.TAG, "Server $guid timed out")
-            MmkvManager.encodeServerTestDelayMillis(guid, -1L, testSource)
-            null
+            recordFailure(guid, remarks, testSource)
         } catch (e: java.io.IOException) {
             Log.d(AppConfig.TAG, "Network error testing server $guid: ${e.message}")
-            MmkvManager.encodeServerTestDelayMillis(guid, -1L, testSource)
-            null
+            recordFailure(guid, remarks, testSource)
         } catch (e: Exception) {
             Log.e(AppConfig.TAG, "Unexpected error testing server $guid", e)
-            MmkvManager.encodeServerTestDelayMillis(guid, -1L, testSource)
-            null
+            recordFailure(guid, remarks, testSource)
         }
     }
 
-    /**
-     * Tests servers and returns the best one (for Smart Connect) - legacy method.
-     * Consider using smartConnectWithCallbacks for better UX.
-     *
-     * @param context Context (will use applicationContext internally).
-     * @param subscriptionId The subscription ID (empty for all servers).
-     * @return The best server result, or null if none found.
-     */
-    suspend fun testAndFindBest(context: Context, subscriptionId: String): TestResult? {
-        val appContext = context.applicationContext
-        val servers = MmkvManager.getServersBySubscriptionId(subscriptionId)
-        if (servers.isEmpty()) return null
-
-        val results = testServers(appContext, servers, "smart_connect")
-        return results.filter { it.delay > 0 }.minByOrNull { it.delay }
+    private fun recordFailure(guid: String, remarks: String, testSource: String): TestResult {
+        MmkvManager.encodeServerTestDelayMillis(guid, -1L, testSource)
+        return TestResult(guid, remarks, -1L)
     }
 
     /**
-     * Smart Connect with callbacks - connects user quickly then optimizes in background.
-     *
-     * Algorithm:
-     * 1. Shuffle servers to avoid always testing same ones first
-     * 2. Test in batches of SMART_CONNECT_BATCH_SIZE
-     * 3. Call onFirstWorking as soon as ANY working server is found
-     * 4. Continue testing remaining servers
-     * 5. Call onBetterFound if a significantly better server is discovered
-     * 6. Stop early if a "good enough" server is found (< GOOD_ENOUGH_LATENCY_MS)
-     *
-     * @param context Application context.
-     * @param subscriptionId Subscription ID (empty for all servers).
-     * @param onProgress Called with progress updates (tested/total).
-     * @param onFirstWorking Called when first working server found - connect user immediately!
-     * @param onBetterFound Called if a better server is found during continued testing.
-     * @param onComplete Called when all testing is complete.
+     * Tests servers and returns the best one. Consider smartConnectWithCallbacks for better UX.
+     */
+    suspend fun testAndFindBest(context: Context, subscriptionId: String): TestResult? {
+        val servers = MmkvManager.getServersBySubscriptionId(subscriptionId)
+        if (servers.isEmpty()) return null
+
+        return testServers(context.applicationContext, servers, "smart_connect")
+            .filter { it.delay > 0 }
+            .minByOrNull { it.delay }
+    }
+
+    /**
+     * Smart Connect: Tests servers in batches, connects to first working server immediately,
+     * continues testing for better servers, stops early if good enough server found.
      */
     suspend fun smartConnectWithCallbacks(
         context: Context,
@@ -431,23 +362,13 @@ object BackgroundServerTester {
         onComplete(finalBest)
     }
 
-    /**
-     * Cancels any ongoing Smart Connect operation.
-     */
     fun cancelSmartConnect() {
         smartConnectCancelled.set(true)
         Log.i(AppConfig.TAG, "Smart Connect: Cancel requested")
     }
 
-    /**
-     * Schedules periodic server testing.
-     *
-     * @param context Context (will use applicationContext).
-     * @param intervalMinutes The interval in minutes (minimum 15 for WorkManager).
-     */
     fun schedulePeriodicTest(context: Context, intervalMinutes: Long) {
-        val appContext = context.applicationContext
-        val rw = RemoteWorkManager.getInstance(appContext)
+        val rw = RemoteWorkManager.getInstance(context.applicationContext)
         rw.cancelUniqueWork(AppConfig.AUTO_SERVER_TEST_TASK_NAME)
 
         val constraints = Constraints.Builder()
@@ -458,11 +379,7 @@ object BackgroundServerTester {
         rw.enqueueUniquePeriodicWork(
             AppConfig.AUTO_SERVER_TEST_TASK_NAME,
             ExistingPeriodicWorkPolicy.UPDATE,
-            PeriodicWorkRequest.Builder(
-                TestAndSwitchTask::class.java,
-                intervalMinutes,
-                TimeUnit.MINUTES
-            )
+            PeriodicWorkRequest.Builder(TestAndSwitchTask::class.java, intervalMinutes, TimeUnit.MINUTES)
                 .setConstraints(constraints)
                 .setInitialDelay(intervalMinutes, TimeUnit.MINUTES)
                 .build()
@@ -470,28 +387,13 @@ object BackgroundServerTester {
         Log.i(AppConfig.TAG, "Scheduled background server testing every $intervalMinutes minutes")
     }
 
-    /**
-     * Cancels periodic server testing.
-     *
-     * @param context Context (will use applicationContext).
-     */
     fun cancelPeriodicTest(context: Context) {
-        val appContext = context.applicationContext
-        val rw = RemoteWorkManager.getInstance(appContext)
-        rw.cancelUniqueWork(AppConfig.AUTO_SERVER_TEST_TASK_NAME)
+        RemoteWorkManager.getInstance(context.applicationContext)
+            .cancelUniqueWork(AppConfig.AUTO_SERVER_TEST_TASK_NAME)
         Log.i(AppConfig.TAG, "Cancelled background server testing")
     }
 
-    /**
-     * Triggers an immediate test (e.g., after subscription update).
-     *
-     * @param context Context (will use applicationContext).
-     * @param subscriptionId The subscription ID to test (passed to worker via input data).
-     */
     fun triggerImmediateTest(context: Context, subscriptionId: String) {
-        val appContext = context.applicationContext
-        val rw = RemoteWorkManager.getInstance(appContext)
-
         val constraints = Constraints.Builder()
             .setRequiredNetworkType(NetworkType.CONNECTED)
             .build()
@@ -500,7 +402,7 @@ object BackgroundServerTester {
             .putString(KEY_SUBSCRIPTION_ID, subscriptionId)
             .build()
 
-        rw.enqueue(
+        RemoteWorkManager.getInstance(context.applicationContext).enqueue(
             OneTimeWorkRequest.Builder(TestAndSwitchTask::class.java)
                 .setConstraints(constraints)
                 .setInputData(inputData)

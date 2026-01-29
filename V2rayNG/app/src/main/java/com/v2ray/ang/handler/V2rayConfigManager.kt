@@ -24,6 +24,7 @@ import com.v2ray.ang.fmt.TrojanFmt
 import com.v2ray.ang.fmt.VlessFmt
 import com.v2ray.ang.fmt.VmessFmt
 import com.v2ray.ang.fmt.WireguardFmt
+import com.v2ray.ang.service.HevLibraryChecker
 import com.v2ray.ang.util.HttpUtil
 import com.v2ray.ang.util.JsonUtil
 import com.v2ray.ang.util.Utils
@@ -358,7 +359,11 @@ object V2rayConfigManager {
     //region some sub function
 
     private fun needTun(): Boolean {
-        return SettingsManager.isVpnMode() && !SettingsManager.isUsingHevTun()
+        // Need TUN inbound in xray-core when:
+        // 1. In VPN mode AND
+        // 2. Either HevTun is disabled OR HevTun library is not available
+        return SettingsManager.isVpnMode() &&
+               (!SettingsManager.isUsingHevTun() || !HevLibraryChecker.isLibraryAvailable())
     }
 
     /**
@@ -525,7 +530,8 @@ object V2rayConfigManager {
             }
 
             if(SettingsManager.isVpnMode()) {
-                if (SettingsManager.isUsingHevTun()) {
+                // Use HevTun DNS routing only if enabled AND library is available
+                if (SettingsManager.isUsingHevTun() && HevLibraryChecker.isLibraryAvailable()) {
                     //hev-socks5-tunnel dns routing
                     v2rayConfig.routing.rules.add(
                         0, RulesBean(
@@ -712,7 +718,7 @@ object V2rayConfigManager {
      */
     private fun getMoreOutbounds(v2rayConfig: V2rayConfig, subscriptionId: String): Boolean {
         //fragment proxy
-        if (MmkvManager.decodeSettingsBool(AppConfig.PREF_FRAGMENT_ENABLED, false) == true) {
+        if (MmkvManager.decodeSettingsBool(AppConfig.PREF_FRAGMENT_ENABLED, true) == true) {
             return false
         }
 
@@ -945,7 +951,7 @@ object V2rayConfigManager {
      */
     private fun updateOutboundFragment(v2rayConfig: V2rayConfig): Boolean {
         try {
-            if (MmkvManager.decodeSettingsBool(AppConfig.PREF_FRAGMENT_ENABLED, false) == false) {
+            if (MmkvManager.decodeSettingsBool(AppConfig.PREF_FRAGMENT_ENABLED, true) == false) {
                 return true
             }
             if (v2rayConfig.outbounds[0].streamSettings?.security != AppConfig.TLS

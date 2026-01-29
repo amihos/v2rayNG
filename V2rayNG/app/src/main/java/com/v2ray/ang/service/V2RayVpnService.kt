@@ -293,12 +293,12 @@ class V2RayVpnService : VpnService(), ServiceControl {
     }
 
     /**
-     * Runs the tun2socks process.
-     * Starts the tun2socks process with the appropriate parameters.
+     * Starts tun2socks if HevTun is enabled and available, otherwise xray-core handles TUN directly.
      */
     private fun runTun2socks() {
-        // Only use HevTun if enabled AND library is available
-        if (SettingsManager.isUsingHevTun() && TProxyService.isLibraryAvailable()) {
+        val useHevTun = SettingsManager.isUsingHevTun() && HevLibraryChecker.isLibraryAvailable()
+
+        if (useHevTun) {
             tun2SocksService = TProxyService(
                 context = applicationContext,
                 vpnInterface = mInterface,
@@ -307,7 +307,6 @@ class V2RayVpnService : VpnService(), ServiceControl {
             )
             tun2SocksService?.startTun2Socks()
         } else {
-            // Fallback: xray-core handles TUN directly (configured via tunFd in V2RayServiceManager)
             tun2SocksService = null
             if (SettingsManager.isUsingHevTun()) {
                 Log.w(AppConfig.TAG, "HevTun enabled but library not available, falling back to xray-core TUN")

@@ -44,6 +44,7 @@
     <PreferenceCategory android:title="@string/title_vpn_settings">
         <CheckBoxPreference
             android:key="pref_prefer_ipv6"
+            android:defaultValue="true"
             android:summary="@string/summary_pref_prefer_ipv6"
             android:title="@string/title_pref_prefer_ipv6" />
 
@@ -219,6 +220,7 @@
         app:initialExpandedChildrenCount="0">
         <CheckBoxPreference
             android:key="pref_fragment_enabled"
+            android:defaultValue="true"
             android:title="@string/title_pref_fragment_enabled" />
 
         <EditTextPreference
@@ -245,6 +247,7 @@
         app:initialExpandedChildrenCount="0">
         <CheckBoxPreference
             android:key="pref_auto_update_subscription"
+            android:defaultValue="true"
             android:summary="@string/summary_pref_auto_update_subscription"
             android:title="@string/title_pref_auto_update_subscription" />
         <EditTextPreference
@@ -259,6 +262,7 @@
         app:initialExpandedChildrenCount="0">
         <CheckBoxPreference
             android:key="pref_auto_server_test_enabled"
+            android:defaultValue="true"
             android:summary="@string/summary_pref_auto_server_test"
             android:title="@string/title_pref_auto_server_test" />
         <ListPreference
