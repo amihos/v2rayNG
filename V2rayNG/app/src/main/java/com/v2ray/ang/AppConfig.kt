@@ -52,6 +52,15 @@ object AppConfig {
     const val AUTO_SERVER_TEST_TASK_NAME = "auto_server_tester"
     const val DEFAULT_AUTO_TEST_INTERVAL = "60"
     const val PREF_PREFERRED_REGION = "pref_preferred_region"
+
+    /** Server ranking and exploration settings (for volatile networks like Iran). */
+    const val PREF_EXPLORATION_BUDGET = "pref_exploration_budget"
+    const val DEFAULT_EXPLORATION_BUDGET = 0.15f  // 15% of test budget for failed/stale servers
+    const val DECAY_HALF_LIFE_HOURS = 24L         // Failures lose half weight every 24 hours
+    const val STALE_THRESHOLD_HOURS = 6L          // Results older than 6h need retesting priority
+    const val UNKNOWN_THRESHOLD_HOURS = 24L       // Results older than 24h are "unknown"
+    const val MAX_RECENT_EVENTS = 20              // Keep last 20 success/failure events per server
+    const val EVENT_EXPIRY_DAYS = 7               // Drop events older than 7 days
     const val PREF_SPEED_ENABLED = "pref_speed_enabled"
     const val PREF_CONFIRM_REMOVE = "pref_confirm_remove"
     const val PREF_START_SCAN_IMMEDIATE = "pref_start_scan_immediate"

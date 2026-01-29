@@ -211,12 +211,8 @@ object MmkvManager {
         aff.testDelayMillis = testResult
         aff.lastTestTime = System.currentTimeMillis()
         aff.testSource = testSource
-        // Track historical success/failure for reliability scoring
-        if (testResult > 0) {
-            aff.successCount++
-        } else {
-            aff.failureCount++
-        }
+        // Track historical success/failure with timestamps for time-decay scoring
+        aff.recordResult(success = testResult > 0)
         serverAffStorage.encode(guid, JsonUtil.toJson(aff))
     }
 

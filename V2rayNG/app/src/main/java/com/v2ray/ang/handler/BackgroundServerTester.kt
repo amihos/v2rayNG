@@ -36,6 +36,11 @@ import java.util.concurrent.atomic.AtomicReference
  *
  * Smart Connect: Tests servers in batches, connects to first working server immediately,
  * then continues testing and switches to better servers if found.
+ *
+ * Server Selection Strategy (for volatile networks like Iran):
+ * - Uses time-decayed reliability scoring: old failures fade over 24-72 hours
+ * - Reserves 15% of test budget for "exploration" (retesting failed/stale servers)
+ * - Interleaves exploration servers throughout the test to benefit from early stopping
  */
 object BackgroundServerTester {
 
@@ -50,6 +55,9 @@ object BackgroundServerTester {
     private const val KEY_LATENCY_HISTORY = "latency_history"
     private const val MAX_HISTORY_SIZE = 20
     private const val DEFAULT_GOOD_ENOUGH_LATENCY = 300L
+
+    // Maximum servers to test in one Smart Connect session
+    private const val MAX_SERVERS_TO_TEST = 100
 
     // Common country names mapping for region extraction
     private val COUNTRY_NAME_MAP = mapOf(
@@ -93,6 +101,114 @@ object BackgroundServerTester {
 
     // Flag to allow cancellation of Smart Connect
     private val smartConnectCancelled = AtomicBoolean(false)
+
+    /**
+     * Server selector with exploration budget for volatile networks.
+     *
+     * Strategy:
+     * - Exploitation (80-85%): Test known good servers first, sorted by decayed weighted score
+     * - Exploration (15-20%): Retest failed/stale servers that might have recovered
+     * - Interleave exploration servers throughout the list for early stopping benefit
+     */
+    private object ServerSelector {
+        /**
+         * Select servers for testing with exploration budget.
+         * @param allServers All available server GUIDs
+         * @param testBudget How many servers to test
+         * @param explorationRatio Portion of budget for failed/stale servers (0.15 = 15%)
+         * @return Ordered list of server GUIDs to test
+         */
+        fun selectServersForTesting(
+            allServers: List<String>,
+            testBudget: Int,
+            explorationRatio: Float = AppConfig.DEFAULT_EXPLORATION_BUDGET
+        ): List<String> {
+            val explorationBudget = (testBudget * explorationRatio).toInt().coerceAtLeast(1)
+            val exploitationBudget = testBudget - explorationBudget
+
+            // Categorize servers
+            val (knownGood, stale, failedOrUnknown) = categorizeServers(allServers)
+
+            Log.d(AppConfig.TAG, "ServerSelector: knownGood=${knownGood.size}, stale=${stale.size}, " +
+                    "failedOrUnknown=${failedOrUnknown.size}, exploitBudget=$exploitationBudget, exploreBudget=$explorationBudget")
+
+            // Sort known good by decayed score (best first)
+            val sortedGood = knownGood.sortedBy { guid ->
+                MmkvManager.decodeServerAffiliationInfo(guid)?.getDecayedWeightedScore() ?: Double.MAX_VALUE
+            }
+
+            // Sort exploration candidates by staleness (oldest first - most likely to have changed)
+            val explorationPool = (stale + failedOrUnknown).sortedByDescending { guid ->
+                MmkvManager.decodeServerAffiliationInfo(guid)?.getStalenessScore() ?: Double.MAX_VALUE
+            }
+
+            // Take from each pool
+            val exploitation = sortedGood.take(exploitationBudget)
+            val exploration = explorationPool.take(explorationBudget)
+
+            Log.d(AppConfig.TAG, "ServerSelector: Selected ${exploitation.size} exploitation + ${exploration.size} exploration servers")
+
+            // Interleave exploration throughout the list
+            return interleaveExploration(exploitation, exploration)
+        }
+
+        /**
+         * Categorize servers into: knownGood, stale, failedOrUnknown
+         */
+        private fun categorizeServers(guids: List<String>): Triple<List<String>, List<String>, List<String>> {
+            val knownGood = mutableListOf<String>()
+            val stale = mutableListOf<String>()
+            val failedOrUnknown = mutableListOf<String>()
+
+            for (guid in guids) {
+                val info = MmkvManager.decodeServerAffiliationInfo(guid)
+                when {
+                    // Never tested or very old
+                    info == null || info.isUnknown() -> failedOrUnknown.add(guid)
+                    // Last test failed
+                    info.testDelayMillis <= 0 -> failedOrUnknown.add(guid)
+                    // Successful but stale (>6h old)
+                    info.isStale() -> stale.add(guid)
+                    // Recent successful test
+                    else -> knownGood.add(guid)
+                }
+            }
+            return Triple(knownGood, stale, failedOrUnknown)
+        }
+
+        /**
+         * Interleave exploration servers at regular intervals.
+         * This ensures they get tested even with early stopping.
+         *
+         * Example: exploitation=[G1,G2,G3,G4,G5,G6], exploration=[E1,E2]
+         * interval = 6 / (2+1) = 2
+         * Result: [G1, G2, E1, G3, G4, E2, G5, G6]
+         */
+        private fun interleaveExploration(
+            exploitation: List<String>,
+            exploration: List<String>
+        ): List<String> {
+            if (exploration.isEmpty()) return exploitation
+            if (exploitation.isEmpty()) return exploration
+
+            val result = mutableListOf<String>()
+            val interval = (exploitation.size / (exploration.size + 1)).coerceAtLeast(1)
+            var exploreIndex = 0
+
+            for ((i, server) in exploitation.withIndex()) {
+                result.add(server)
+                // Insert exploration server at regular intervals
+                if ((i + 1) % interval == 0 && exploreIndex < exploration.size) {
+                    result.add(exploration[exploreIndex++])
+                }
+            }
+            // Add any remaining exploration servers at the end
+            while (exploreIndex < exploration.size) {
+                result.add(exploration[exploreIndex++])
+            }
+            return result
+        }
+    }
 
     data class TestResult(
         val guid: String,
@@ -282,11 +398,15 @@ object BackgroundServerTester {
                 ?: MmkvManager.decodeSettingsString(AppConfig.CACHE_SUBSCRIPTION_ID, "")
                 ?: ""
 
-            val servers = MmkvManager.getServersBySubscriptionId(subscriptionId)
-            if (servers.isEmpty()) {
+            val allServers = MmkvManager.getServersBySubscriptionId(subscriptionId)
+            if (allServers.isEmpty()) {
                 Log.i(AppConfig.TAG, "No servers to test")
                 return Result.success()
             }
+
+            // Use intelligent server selection with exploration budget
+            val testBudget = allServers.size.coerceAtMost(MAX_SERVERS_TO_TEST)
+            val servers = ServerSelector.selectServersForTesting(allServers, testBudget)
 
             showNotificationIfAllowed(applicationContext.getString(R.string.smart_connect_testing))
 
@@ -462,7 +582,8 @@ object BackgroundServerTester {
             val delay = V2RayNativeManager.measureOutboundDelay(result.content, testUrl)
             MmkvManager.encodeServerTestDelayMillis(guid, delay, testSource)
             val affiliationInfo = MmkvManager.decodeServerAffiliationInfo(guid)
-            val score = affiliationInfo?.getWeightedScore() ?: delay.toDouble()
+            // Use time-decayed scoring: old failures have less impact
+            val score = affiliationInfo?.getDecayedWeightedScore() ?: delay.toDouble()
             TestResult(guid, remarks, delay, score)
         } catch (e: java.net.SocketTimeoutException) {
             Log.d(AppConfig.TAG, "Server $guid timed out")
@@ -479,7 +600,8 @@ object BackgroundServerTester {
     private fun recordFailure(guid: String, remarks: String, testSource: String): TestResult {
         MmkvManager.encodeServerTestDelayMillis(guid, -1L, testSource)
         val affiliationInfo = MmkvManager.decodeServerAffiliationInfo(guid)
-        val score = affiliationInfo?.getWeightedScore() ?: Double.MAX_VALUE
+        // Use time-decayed scoring: old failures have less impact
+        val score = affiliationInfo?.getDecayedWeightedScore() ?: Double.MAX_VALUE
         return TestResult(guid, remarks, -1L, score)
     }
 
@@ -530,16 +652,24 @@ object BackgroundServerTester {
             return
         }
 
-        // Sort servers by region priority, putting user's preferred region first
-        val preferredRegion = getPreferredRegion()
-        val servers = sortByRegionPriority(
-            MmkvManager.getServersBySubscriptionId(subscriptionId),
-            preferredRegion
-        )
-        if (servers.isEmpty()) {
+        // Get all servers for this subscription
+        val allServers = MmkvManager.getServersBySubscriptionId(subscriptionId)
+        if (allServers.isEmpty()) {
             onComplete(null)
             return
         }
+
+        // Apply region priority first
+        val preferredRegion = getPreferredRegion()
+        val regionSortedServers = sortByRegionPriority(allServers, preferredRegion)
+
+        // Apply intelligent server selection with exploration budget
+        // This ensures failed/stale servers get retested periodically
+        val testBudget = regionSortedServers.size.coerceAtMost(MAX_SERVERS_TO_TEST)
+        val servers = ServerSelector.selectServersForTesting(
+            allServers = regionSortedServers,
+            testBudget = testBudget
+        )
 
         val totalCount = servers.size
         val testUrl = SettingsManager.getDelayTestUrl()
@@ -547,7 +677,7 @@ object BackgroundServerTester {
         var firstWorkingFound = false
         var testedCount = 0
 
-        Log.i(AppConfig.TAG, "Smart Connect: Starting test of $totalCount servers with preferred region: $preferredRegion")
+        Log.i(AppConfig.TAG, "Smart Connect: Starting test of $totalCount servers (from ${allServers.size} total) with preferred region: $preferredRegion")
 
         // Process servers in batches
         for (batch in servers.chunked(SMART_CONNECT_BATCH_SIZE)) {
