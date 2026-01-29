@@ -2,6 +2,10 @@
 <resources>
     <color name="colorPing">#009966</color>
     <color name="colorPingRed">#FF0099</color>
+    <!-- Latency badge colors -->
+    <color name="colorLatencyGood">#009966</color>
+    <color name="colorLatencyMedium">#FF9800</color>
+    <color name="colorLatencyBad">#F44336</color>
     <color name="colorConfigType">#f97910</color>
     <color name="colorWhite">#FFFFFF</color>
     <color name="color_fab_active">#f97910</color>

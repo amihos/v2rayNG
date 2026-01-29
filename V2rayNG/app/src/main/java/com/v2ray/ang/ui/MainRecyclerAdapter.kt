@@ -66,11 +66,32 @@ class MainRecyclerAdapter(
                 holder.itemMainBinding.tvTestResult.setTextColor(ContextCompat.getColor(context, R.color.colorPing))
             }
 
-            //layoutIndicator
-            if (guid == MmkvManager.getSelectServer()) {
+            //layoutIndicator and latency badge
+            val isSelected = guid == MmkvManager.getSelectServer()
+            if (isSelected) {
                 holder.itemMainBinding.layoutIndicator.setBackgroundResource(R.color.colorIndicator)
+
+                // Show latency badge for selected server
+                val latency = aff?.testDelayMillis ?: 0L
+                if (latency > 0) {
+                    holder.itemMainBinding.tvLatencyBadge.visibility = View.VISIBLE
+                    holder.itemMainBinding.tvLatencyBadge.text = "${latency}ms"
+
+                    // Set badge color based on latency
+                    val badgeColor = when {
+                        latency < 200 -> R.color.colorLatencyGood
+                        latency < 500 -> R.color.colorLatencyMedium
+                        else -> R.color.colorLatencyBad
+                    }
+                    holder.itemMainBinding.tvLatencyBadge.background.setTint(
+                        ContextCompat.getColor(context, badgeColor)
+                    )
+                } else {
+                    holder.itemMainBinding.tvLatencyBadge.visibility = View.GONE
+                }
             } else {
                 holder.itemMainBinding.layoutIndicator.setBackgroundResource(0)
+                holder.itemMainBinding.tvLatencyBadge.visibility = View.GONE
             }
 
             //subscription remarks
