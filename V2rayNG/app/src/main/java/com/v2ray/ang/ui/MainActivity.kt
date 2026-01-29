@@ -155,6 +155,10 @@ class MainActivity : BaseActivity(), NavigationView.OnNavigationItemSelectedList
     }
 
     private fun handleLayoutTestClick() {
+        // Always scroll to the currently selected server
+        MmkvManager.getSelectServer()?.let { scrollToServer(it) }
+
+        // If VPN is running, also test the connection
         if (mainViewModel.isRunning.value == true) {
             setTestState(getString(R.string.connection_test_testing))
             mainViewModel.testCurrentServerRealPing()
